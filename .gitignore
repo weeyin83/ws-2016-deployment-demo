@@ -1,0 +1,33 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+crash.log
+crash.*.log
+*.tfplan
+*.tfplan.*
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Local variable files (never commit real credentials/subscription details)
+*.tfvars
+*.tfvars.json
+!terraform.tfvars.example
+
+# Local secret / credential material
+*.pem
+*.key
+*secret*
+*credentials*
+!scripts/*.ps1
+
+# Editor / OS
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local logs
+*.log

@@ -1,0 +1,148 @@
+<#
+  Arc evaluation onboarding orchestrator - rendered and executed by Terraform
+  via the CustomScriptExtension in modules/arc-onboarding. This file is a
+  TEMPLATE: Terraform's templatefile() substitutes the $${...} placeholders
+  below with real values at apply time. The committed template itself never
+  contains real secrets - only the rendered-in-memory copy (held in Terraform
+  state as part of the extension's protected_settings) does.
+
+  This script intentionally duplicates the logic in the top-level
+  scripts/Prepare-ArcEvaluationVm.ps1, Install-ArcConnectedMachineAgent.ps1
+  and Connect-AzureArcServer.ps1 so it can run as a single, self-contained
+  CustomScriptExtension payload (Azure VM extensions execute one script with
+  no separate file dependencies unless hosted externally, which this design
+  deliberately avoids). Use the standalone scripts for manual re-runs,
+  troubleshooting, or if you disable Terraform automation for this VM.
+#>
+
+$ErrorActionPreference = "Stop"
+$logDir = "C:\ArcEvaluation"
+New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+Start-Transcript -Path "$logDir\onboarding.log" -Append
+
+function Write-Step {
+    param([string]$Message)
+    Write-Output "==== $(Get-Date -Format o) - $Message ===="
+}
+
+try {
+    # ------------------------------------------------------------------
+    # Step 1: Arc evaluation prep - MSFT_ARC_TEST + IMDS/WireServer block
+    # ------------------------------------------------------------------
+    Write-Step "Setting MSFT_ARC_TEST machine environment variable"
+    [Environment]::SetEnvironmentVariable("MSFT_ARC_TEST", "true", "Machine")
+
+    Write-Step "Creating persistent Windows Firewall rules blocking IMDS/WireServer"
+    $blockedEndpoints = @(
+        @{ Name = "Block-Outbound-IMDS"; Addr = "169.254.169.254" },
+        @{ Name = "Block-Outbound-WireServer"; Addr = "169.254.169.253" }
+    )
+    foreach ($ep in $blockedEndpoints) {
+        if (-not (Get-NetFirewallRule -DisplayName $ep.Name -ErrorAction SilentlyContinue)) {
+            New-NetFirewallRule -DisplayName $ep.Name -Direction Outbound -Action Block `
+                -RemoteAddress $ep.Addr -Profile Any -Enabled True | Out-Null
+            Write-Output "Created firewall rule: $($ep.Name) -> $($ep.Addr)"
+        } else {
+            Write-Output "Firewall rule already present: $($ep.Name)"
+        }
+    }
+
+    # NOTE: Removing "incompatible extensions" is an Azure Resource Manager
+    # level operation (extensions are ARM child resources), not something
+    # that can be done reliably from inside the guest OS. This Terraform
+    # configuration only ever installs the single CustomScriptExtension used
+    # here, so there is nothing else to remove. If you have manually added
+    # other extensions to an Arc evaluation VM, remove them via
+    # `az vm extension delete` BEFORE onboarding - see README troubleshooting.
+    Write-Step "Extension hygiene check: no additional extensions are installed by this configuration"
+
+    # ------------------------------------------------------------------
+    # Step 2: Install the Azure Connected Machine agent
+    # ------------------------------------------------------------------
+    Write-Step "Downloading Azure Connected Machine agent"
+    $installerPath = "$logDir\AzureConnectedMachineAgent.msi"
+    $downloadAttempts = 0
+    do {
+        $downloadAttempts++
+        try {
+            Invoke-WebRequest -Uri "https://aka.ms/AzureConnectedMachineAgent" -OutFile $installerPath -UseBasicParsing
+            break
+        } catch {
+            Write-Output "Download attempt $downloadAttempts failed: $_"
+            if ($downloadAttempts -ge 3) { throw }
+            Start-Sleep -Seconds 15
+        }
+    } while ($downloadAttempts -lt 3)
+
+    Write-Step "Installing Azure Connected Machine agent"
+    $msiArgs = @("/i", "`"$installerPath`"", "/qn", "/norestart", "/l*v", "`"$logDir\agent-install.log`"")
+    $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList $msiArgs -Wait -PassThru
+    if ($proc.ExitCode -ne 0) {
+        throw "Azure Connected Machine agent install failed with exit code $($proc.ExitCode)"
+    }
+
+    $azcmagent = "$env:ProgramFiles\AzureConnectedMachineAgent\azcmagent.exe"
+
+    # ------------------------------------------------------------------
+    # Step 3: Connect to Azure Arc using the least-privilege service principal
+    # ------------------------------------------------------------------
+    Write-Step "Connecting to Azure Arc (azcmagent connect)"
+    & $azcmagent connect `
+        --service-principal-id "${sp_client_id}" `
+        --service-principal-secret "${sp_secret}" `
+        --resource-group "${resource_group_name}" `
+        --tenant-id "${tenant_id}" `
+        --subscription-id "${subscription_id}" `
+        --location "${location}" `
+        --resource-name "${arc_machine_name}" `
+        --cloud "AzureCloud" `
+        --tags "ArcEvaluation=true"
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "azcmagent connect failed with exit code $LASTEXITCODE"
+    }
+
+    # ------------------------------------------------------------------
+    # Step 4: Verify onboarding succeeded
+    # ------------------------------------------------------------------
+    Write-Step "Verifying Arc connection"
+    & $azcmagent show
+    if ($LASTEXITCODE -ne 0) {
+        throw "azcmagent show reported a non-zero exit code after connect"
+    }
+
+    # ------------------------------------------------------------------
+    # Step 5: Schedule the deferred Guest Agent disable (see header comment
+    # for why this cannot run inline).
+    # ------------------------------------------------------------------
+    Write-Step "Writing deferred Guest Agent disable script"
+    $disableScriptPath = "$logDir\Disable-GuestAgentDeferred.ps1"
+    @'
+$ErrorActionPreference = "SilentlyContinue"
+Start-Transcript -Path "C:\ArcEvaluation\disable-guest-agent.log" -Append
+try {
+    Stop-Service -Name "WindowsAzureGuestAgent" -Force
+    Set-Service -Name "WindowsAzureGuestAgent" -StartupType Disabled
+    Write-Output "$(Get-Date -Format o) - Azure Windows VM Guest Agent stopped and disabled."
+} finally {
+    Unregister-ScheduledTask -TaskName "ArcEval-DisableGuestAgent" -Confirm:$false -ErrorAction SilentlyContinue
+    Stop-Transcript
+}
+'@ | Set-Content -Path $disableScriptPath -Encoding UTF8
+
+    Write-Step "Registering one-time deferred Scheduled Task"
+    $action  = New-ScheduledTaskAction -Execute "powershell.exe" `
+        -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$disableScriptPath`""
+    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5)
+    $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+    Register-ScheduledTask -TaskName "ArcEval-DisableGuestAgent" -Action $action `
+        -Trigger $trigger -Principal $principal -Force | Out-Null
+
+    Write-Step "Arc evaluation onboarding completed successfully. Guest Agent will be disabled in ~5 minutes."
+    Stop-Transcript
+    exit 0
+} catch {
+    Write-Output "ONBOARDING FAILED: $_"
+    Stop-Transcript
+    exit 1
+}

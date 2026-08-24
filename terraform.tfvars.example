@@ -1,0 +1,50 @@
+############################################
+# terraform.tfvars.example
+# Copy to terraform.tfvars and fill in values. NEVER commit terraform.tfvars
+# (it is already excluded via .gitignore). Do not put secrets in this file
+# either - use environment variables (TF_VAR_*) for admin_password and any
+# service principal secret.
+############################################
+
+subscription_id = "00000000-0000-0000-0000-000000000000" # az account show --query id -o tsv
+tenant_id       = "00000000-0000-0000-0000-000000000000" # az account show --query tenantId -o tsv
+
+workload_name = "ws16arc"
+environment   = "demo"
+location      = "swedencentral" # do not change without re-verifying image availability
+instance      = "01"
+
+owner                   = "your-name-or-team"
+intended_deletion_date  = "2026-09-30" # YYYY-MM-DD, informational tag only
+
+# admin_password: DO NOT set here. Supply via:
+#   export TF_VAR_admin_password='a-strong-password-here'
+admin_username = "azdemoadmin"
+
+default_vm_size               = "Standard_B2s_v2"
+os_disk_storage_account_type  = "Standard_LRS"
+enable_azure_hybrid_benefit   = false
+
+default_auto_shutdown_enabled = true
+default_auto_shutdown_time    = "1900"
+auto_shutdown_timezone        = "W. Europe Standard Time"
+
+# Recommended: let Terraform create a least-privilege service principal for
+# Arc onboarding (requires Application Administrator or similar in Entra ID).
+create_arc_service_principal = true
+
+# Only needed if create_arc_service_principal = false:
+# arc_service_principal_client_id = ""   # supply via TF_VAR_arc_service_principal_client_id
+# arc_service_principal_secret    = ""   # supply via TF_VAR_arc_service_principal_secret
+
+# Uncomment and adjust only if you need temporary public RDP access to a
+# specific VM for the demo. Never use 0.0.0.0/0 as the trusted CIDR.
+# vm_configs = {
+#   "arc-vm01" = {
+#     management_type          = "arc-evaluation"
+#     os_edition               = "windows-server-2016-datacenter"
+#     enable_public_ip         = true
+#     enable_public_rdp        = true
+#     trusted_rdp_source_cidr  = "203.0.113.10/32"
+#   }
+# }
