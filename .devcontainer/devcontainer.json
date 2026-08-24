@@ -1,0 +1,163 @@
+{
+  // Azure Terraform IaC Dev Container.
+  // Strategy: prebuilt Microsoft base image + official Dev Container Features.
+  // No custom Dockerfile / no Docker build => fastest possible startup and
+  // rebuilds in both GitHub Codespaces and local VS Code.
+  "name": "Azure Terraform IaC",
+
+  // Base image: official Microsoft Dev Container "base:ubuntu".
+  // - Small, Microsoft-maintained, security-patched, and pre-warmed on MCR
+  //   and in Codespaces, so the image pull is fast.
+  // - Contains git, curl, unzip, jq, a non-root "vscode" user with passwordless
+  //   sudo, and sensible shell defaults, but no heavy app-dev runtimes.
+  // - "universal" is far larger (multi-language) and slower to pull; not needed
+  //   for infrastructure engineering, so "base:ubuntu" is the optimal choice.
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+
+  // All tooling is added through official/first-party Features. Features are
+  // cached layers, so unchanged Features are not rebuilt on every rebuild.
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {
+      "installZsh": false,
+      "installOhMyZsh": false,
+      "upgradePackages": false,
+      "username": "vscode"
+    },
+    // Terraform + tflint + terraform-docs (latest stable).
+    "ghcr.io/devcontainers/features/terraform:1": {
+      "version": "latest",
+      "tflint": "latest",
+      "installTFsec": false,
+      "installTerraformDocs": true
+    },
+    // Azure CLI, and Bicep CLI via the same Feature (installBicep).
+    "ghcr.io/devcontainers/features/azure-cli:1": {
+      "version": "latest",
+      "installBicep": true
+    },
+    // Azure Developer CLI (azd) - first-party feature from the Azure org.
+    "ghcr.io/azure/azure-dev/azd:latest": {
+      "version": "stable"
+    },
+    // PowerShell 7.
+    "ghcr.io/devcontainers/features/powershell:1": {
+      "version": "latest"
+    },
+    // GitHub CLI.
+    "ghcr.io/devcontainers/features/github-cli:1": {
+      "version": "latest"
+    }
+  },
+
+  // Non-secret environment only. Credentials are NEVER placed here.
+  "containerEnv": {
+    // Terraform provider plugin cache -> mounted to a persistent volume below.
+    "TF_PLUGIN_CACHE_DIR": "/home/vscode/.terraform.d/plugin-cache",
+    // CI-friendly Terraform behaviour (no interactive upgrade prompts).
+    "TF_IN_AUTOMATION": "1",
+    // Quieter, faster Azure CLI defaults.
+    "AZURE_CORE_COLLECT_TELEMETRY": "0",
+    "AZURE_CORE_ONLY_SHOW_ERRORS": "true"
+  },
+
+  // Persist caches across rebuilds using named volumes (fast rebuilds).
+  // Volumes live outside the image, so no secrets are baked into image layers.
+  "mounts": [
+    // Terraform provider plugins survive rebuilds -> avoids re-downloading
+    // hundreds of MB of AzureRM/AzureAD/AzAPI providers every rebuild.
+    "source=aztf-plugin-cache,target=/home/vscode/.terraform.d/plugin-cache,type=volume",
+    // Optional: persist az login token cache between rebuilds (dev convenience).
+    // Tokens are stored only in this local/Codespaces volume, never in the image.
+    "source=aztf-azure-auth,target=/home/vscode/.azure,type=volume"
+  ],
+
+  // Least privilege: run as the non-root "vscode" user.
+  "remoteUser": "vscode",
+  "updateRemoteUserUID": true,
+
+  // Runs once at container creation (not on every start) -> apt work is amortised.
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  // Lightweight, runs on every start: fixes cache perms + prints auth hints.
+  "postStartCommand": "bash .devcontainer/post-start.sh",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "GitHub.copilot",
+        "GitHub.copilot-chat",
+        "HashiCorp.terraform",
+        "ms-vscode.azurecli",
+        "ms-vscode.azure-account",
+        "ms-vscode.PowerShell",
+        "ms-azuretools.vscode-bicep",
+        "redhat.vscode-yaml",
+        "yzhang.markdown-all-in-one",
+        "eamodio.gitlens"
+      ],
+      "settings": {
+        // ---- Editor defaults for IaC ----
+        "editor.formatOnSave": true,
+        "editor.renderWhitespace": "boundary",
+        "editor.rulers": [100],
+        "files.trimTrailingWhitespace": true,
+        "files.insertFinalNewline": true,
+        "files.trimFinalNewlines": true,
+        "files.eol": "\n",
+
+        // ---- Terraform: format on save + language server validation ----
+        "[terraform]": {
+          "editor.defaultFormatter": "HashiCorp.terraform",
+          "editor.formatOnSave": true,
+          "editor.tabSize": 2
+        },
+        "[terraform-vars]": {
+          "editor.defaultFormatter": "HashiCorp.terraform",
+          "editor.formatOnSave": true,
+          "editor.tabSize": 2
+        },
+        "terraform.validation.enableEnhancedValidation": true,
+        "terraform.languageServer.enable": true,
+
+        // ---- PowerShell: format on save ----
+        "[powershell]": {
+          "editor.defaultFormatter": "ms-vscode.PowerShell",
+          "editor.formatOnSave": true
+        },
+        "powershell.codeFormatting.preset": "OTBS",
+        "powershell.codeFormatting.autoCorrectAliases": true,
+        "powershell.codeFormatting.trimWhitespaceAroundPipe": true,
+        "powershell.integratedConsole.showOnStartup": false,
+
+        // ---- YAML / Markdown / Bicep ----
+        "[yaml]": {
+          "editor.defaultFormatter": "redhat.vscode-yaml",
+          "editor.tabSize": 2
+        },
+        "[bicep]": {
+          "editor.defaultFormatter": "ms-azuretools.vscode-bicep",
+          "editor.tabSize": 2
+        },
+
+        // ---- Terminal defaults (bash keeps az/azd completion; pwsh available) ----
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "terminal.integrated.profiles.linux": {
+          "bash": { "path": "bash", "icon": "terminal-bash" },
+          "pwsh": { "path": "pwsh", "icon": "terminal-powershell" }
+        },
+
+        // ---- Copilot tuned for infra-as-code ----
+        "github.copilot.enable": {
+          "*": true,
+          "plaintext": true,
+          "markdown": true,
+          "terraform": true,
+          "powershell": true,
+          "yaml": true
+        }
+      }
+    }
+  },
+
+  // No inbound ports required for IaC authoring.
+  "forwardPorts": []
+}

@@ -1,0 +1,38 @@
+# =============================================================================
+# .devcontainer/.gitignore
+# Recommended ignores to keep credentials and local state OUT of source control.
+# Copy/merge these entries into the repository-root .gitignore as well.
+# =============================================================================
+
+# ---- Terraform ----
+.terraform/
+.terraform.lock.hcl.tmp
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# ---- Variable / secret files (never commit secrets) ----
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+.env
+.env.*
+*.auto.tfvars
+
+# ---- Local credential / auth material ----
+.azure/
+*.pem
+*.pfx
+*.key
+azureauth.json
+sp-credentials.json
+
+# ---- Editor / OS noise ----
+.DS_Store
+Thumbs.db

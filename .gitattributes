@@ -1,0 +1,12 @@
+# Enforce LF for shell scripts so they run correctly inside Linux dev containers,
+# even when the repo is cloned on Windows.
+*.sh text eol=lf
+.devcontainer/post-create.sh text eol=lf
+.devcontainer/post-start.sh text eol=lf
+
+# Keep other text files normalized.
+*.tf   text eol=lf
+*.tfvars text eol=lf
+*.json text
+*.md   text
+*.ps1  text eol=crlf
