@@ -54,11 +54,11 @@ if (-not (Test-Path $azcmagent)) {
     throw "azcmagent.exe not found. Run Install-ArcConnectedMachineAgent.ps1 first."
 }
 
-Write-Output "Running azcmagent connect - a browser/device-code login prompt will appear."
+Write-Output "Running azcmagent connect - a device-code login prompt will appear."
 Write-Output "Sign in with an account that holds the 'Azure Connected Machine Onboarding' role on $ResourceGroupName."
 & $azcmagent connect --resource-group $ResourceGroupName --tenant-id $TenantId `
     --subscription-id $SubscriptionId --location $Location --resource-name $ResourceName `
-    --cloud $Cloud --tags "ArcEvaluation=true"
+    --cloud $Cloud --tags "ArcEvaluation=true" --use-device-code
 
 if ($LASTEXITCODE -ne 0) {
     throw "azcmagent connect failed with exit code $LASTEXITCODE"

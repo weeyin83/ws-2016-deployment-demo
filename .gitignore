@@ -7,6 +7,9 @@ crash.log
 crash.*.log
 *.tfplan
 *.tfplan.*
+tfplan
+tfplan.*
+*.plan
 override.tf
 override.tf.json
 *_override.tf

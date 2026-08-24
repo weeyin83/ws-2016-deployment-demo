@@ -53,12 +53,18 @@ arc_onboarding_method = "service_principal_new"
 
 # Uncomment and adjust only if you need temporary public RDP access to a
 # specific VM for the demo. Never use 0.0.0.0/0 as the trusted CIDR.
+# IMPORTANT: this replaces the ENTIRE default vm_configs map - all 5 VMs must
+# be listed here, or the missing ones will be destroyed.
 # vm_configs = {
 #   "arc-vm01" = {
-#     management_type          = "arc-evaluation"
-#     os_edition               = "windows-server-2016-datacenter"
-#     enable_public_ip         = true
-#     enable_public_rdp        = true
-#     trusted_rdp_source_cidr  = "203.0.113.10/32"
+#     management_type         = "arc-evaluation"
+#     os_edition              = "windows-server-2016-datacenter"
+#     enable_public_ip        = true
+#     enable_public_rdp       = true
+#     trusted_rdp_source_cidr = "203.0.113.10/32" # replace with YOUR public IP/32
 #   }
+#   "arc-vm02"    = { management_type = "arc-evaluation", os_edition = "windows-server-2016-datacenter" }
+#   "arc-vm03"    = { management_type = "arc-evaluation", os_edition = "windows-server-2016-datacenter" }
+#   "native-vm01" = { management_type = "native-azure", os_edition = "windows-server-2016-datacenter" }
+#   "native-vm02" = { management_type = "native-azure", os_edition = "windows-server-2016-datacenter" }
 # }

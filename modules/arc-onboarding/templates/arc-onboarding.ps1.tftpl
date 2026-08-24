@@ -82,6 +82,11 @@ try {
     # ------------------------------------------------------------------
     # Step 2: Install the Azure Connected Machine agent
     # ------------------------------------------------------------------
+    # Windows Server 2016's default .NET/PowerShell TLS setting excludes
+    # TLS 1.2, which aka.ms/Azure endpoints require - without this, downloads
+    # fail with "Could not create SSL/TLS secure channel."
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
     Write-Step "Downloading Azure Connected Machine agent"
     $installerPath = "$logDir\AzureConnectedMachineAgent.msi"
     $downloadAttempts = 0
@@ -122,8 +127,8 @@ try {
             '$ErrorActionPreference = "Stop"',
             ('$azcmagent = "{0}"' -f $azcmagent),
             ('$disableScriptPath = "{0}"' -f $disableScriptPath),
-            'Write-Output "Running azcmagent connect - a browser/device-code login prompt will appear."',
-            ('& $azcmagent connect --resource-group "{0}" --tenant-id "{1}" --subscription-id "{2}" --location "{3}" --resource-name "{4}" --cloud "AzureCloud" --tags "ArcEvaluation=true"' -f "${resource_group_name}", "${tenant_id}", "${subscription_id}", "${location}", "${arc_machine_name}"),
+            'Write-Output "Running azcmagent connect - a device-code login prompt will appear (URL + short code to enter on any device with a browser)."',
+            ('& $azcmagent connect --resource-group "{0}" --tenant-id "{1}" --subscription-id "{2}" --location "{3}" --resource-name "{4}" --cloud "AzureCloud" --tags "ArcEvaluation=true" --use-device-code' -f "${resource_group_name}", "${tenant_id}", "${subscription_id}", "${location}", "${arc_machine_name}"),
             'if ($LASTEXITCODE -ne 0) { throw "azcmagent connect failed with exit code $LASTEXITCODE" }',
             '& $azcmagent show',
             'if ($LASTEXITCODE -ne 0) { throw "azcmagent show reported a non-zero exit code after connect" }',

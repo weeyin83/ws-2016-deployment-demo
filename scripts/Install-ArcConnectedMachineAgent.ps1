@@ -23,6 +23,11 @@ param(
 $ErrorActionPreference = "Stop"
 New-Item -ItemType Directory -Path $LogDirectory -Force | Out-Null
 
+# Windows Server 2016's default .NET/PowerShell TLS setting excludes TLS 1.2,
+# which aka.ms/Azure endpoints require - without this, downloads fail with
+# "Could not create SSL/TLS secure channel."
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
 $installerPath = Join-Path $LogDirectory "AzureConnectedMachineAgent.msi"
 
 Write-Output "Downloading Azure Connected Machine agent..."

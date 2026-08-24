@@ -36,3 +36,5 @@ sp-credentials.json
 # ---- Editor / OS noise ----
 .DS_Store
 Thumbs.db
+
+commands.md

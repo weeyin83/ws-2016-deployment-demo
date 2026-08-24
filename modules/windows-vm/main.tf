@@ -56,12 +56,6 @@ variable "enable_public_ip" {
   default = false
 }
 
-variable "enable_system_identity" {
-  description = "Adds a system-assigned managed identity. Used only by Arc evaluation VMs, to authenticate to the onboarding-script storage account without storage account keys (this subscription enforces shared-key auth to be disabled)."
-  type        = bool
-  default     = false
-}
-
 variable "auto_shutdown_enabled" {
   type = bool
 }
@@ -136,13 +130,6 @@ resource "azurerm_windows_virtual_machine" "main" {
   boot_diagnostics {
     storage_account_uri = null
   }
-
-  dynamic "identity" {
-    for_each = var.enable_system_identity ? [1] : []
-    content {
-      type = "SystemAssigned"
-    }
-  }
 }
 
 # Free, built-in auto-shutdown schedule (Microsoft.DevTestLab/schedules) -
@@ -179,8 +166,4 @@ output "private_ip_address" {
 
 output "public_ip_address" {
   value = var.enable_public_ip ? azurerm_public_ip.main[0].ip_address : null
-}
-
-output "system_identity_principal_id" {
-  value = var.enable_system_identity ? azurerm_windows_virtual_machine.main.identity[0].principal_id : null
 }
