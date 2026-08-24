@@ -29,13 +29,27 @@ default_auto_shutdown_enabled = true
 default_auto_shutdown_time    = "1900"
 auto_shutdown_timezone        = "W. Europe Standard Time"
 
-# Recommended: let Terraform create a least-privilege service principal for
-# Arc onboarding (requires Application Administrator or similar in Entra ID).
-create_arc_service_principal = true
+# How the three Arc evaluation VMs authenticate onboarding. One of:
+#   "service_principal_new"      - Terraform creates the Entra app/SP (needs
+#                                  Application Administrator/equivalent).
+#   "service_principal_existing" - you supply an already-created SP's IDs
+#                                  below (needs no Entra admin role for you).
+#   "interactive_user"           - no Entra app/SP at all; Terraform grants
+#                                  YOU (or the principal below) the RBAC role,
+#                                  and you run azcmagent connect manually via
+#                                  RDP/Serial Console. Use this if your tenant
+#                                  blocks app/SP creation entirely (e.g.
+#                                  `az ad sp create-for-rbac` fails with
+#                                  "Insufficient privileges").
+arc_onboarding_method = "service_principal_new"
 
-# Only needed if create_arc_service_principal = false:
+# Only needed if arc_onboarding_method = "service_principal_existing":
 # arc_service_principal_client_id = ""   # supply via TF_VAR_arc_service_principal_client_id
 # arc_service_principal_secret    = ""   # supply via TF_VAR_arc_service_principal_secret
+
+# Only used if arc_onboarding_method = "interactive_user". Leave empty to
+# default to whoever runs `terraform apply`.
+# interactive_onboarding_principal_id = ""
 
 # Uncomment and adjust only if you need temporary public RDP access to a
 # specific VM for the demo. Never use 0.0.0.0/0 as the trusted CIDR.

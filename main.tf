@@ -39,23 +39,53 @@ module "network" {
 }
 
 ############################################
-# Optional: Entra ID service principal dedicated to Arc onboarding
-# (least-privilege - only the "Azure Connected Machine Onboarding" role,
-# scoped to this resource group).
+# Arc onboarding identity - one of three methods (see variables.tf for the
+# full decision guide): a Terraform-created service principal, an existing
+# caller-supplied service principal, or an interactively-connected human user.
+#
+# NOTE: creating an application + service principal via Microsoft Graph
+# requires an Entra ID role such as Application Administrator or Cloud
+# Application Administrator (or the Application.ReadWrite.All Graph
+# permission). Some tenants (e.g. locked-down eval/sandbox tenants) block this
+# entirely for every non-admin identity, even via `az ad sp create-for-rbac` -
+# in that case use arc_onboarding_method = "interactive_user" instead, which
+# only needs an Azure RBAC role assignment (a completely different permission
+# model, typically covered by Owner/User Access Administrator).
 ############################################
 
+locals {
+  arc_create_sp    = var.arc_onboarding_method == "service_principal_new"
+  arc_use_existing = var.arc_onboarding_method == "service_principal_existing"
+  arc_interactive  = var.arc_onboarding_method == "interactive_user"
+}
+
+# Current caller - used as the default RBAC assignee for interactive_user mode.
+# Reading your own identity requires no special permissions.
+data "azurerm_client_config" "current" {}
+
 resource "azuread_application" "arc_onboarding" {
-  count        = var.create_arc_service_principal ? 1 : 0
+  count        = local.arc_create_sp ? 1 : 0
   display_name = "spn-${local.name_prefix}-arc-onboarding"
 }
 
+# Microsoft Graph needs a few seconds to replicate a newly created application
+# object before a service principal can be created for it. This does NOT fix
+# a genuine permissions error (see note above) - only the rarer replication
+# race some tenants exhibit.
+resource "time_sleep" "app_replication" {
+  count           = local.arc_create_sp ? 1 : 0
+  depends_on      = [azuread_application.arc_onboarding]
+  create_duration = "30s"
+}
+
 resource "azuread_service_principal" "arc_onboarding" {
-  count     = var.create_arc_service_principal ? 1 : 0
-  client_id = azuread_application.arc_onboarding[0].client_id
+  count      = local.arc_create_sp ? 1 : 0
+  client_id  = azuread_application.arc_onboarding[0].client_id
+  depends_on = [time_sleep.app_replication]
 }
 
 resource "azuread_service_principal_password" "arc_onboarding" {
-  count                = var.create_arc_service_principal ? 1 : 0
+  count                = local.arc_create_sp ? 1 : 0
   service_principal_id = azuread_service_principal.arc_onboarding[0].id
   # 24h validity is enough to cover an onboarding demo window; recreate if the
   # demo runs longer. Kept short deliberately to limit exposure of the secret
@@ -67,28 +97,50 @@ resource "azuread_service_principal_password" "arc_onboarding" {
   }
 }
 
-resource "azurerm_role_assignment" "arc_onboarding" {
-  count = var.create_arc_service_principal ? 1 : 0
+# Looks up an existing, caller-supplied service principal by client ID.
+# Read-only Graph data sources work for any authenticated user (no
+# Application Administrator role required), unlike creating one above.
+data "azuread_service_principal" "existing_arc_onboarding" {
+  count     = local.arc_use_existing ? 1 : 0
+  client_id = var.arc_service_principal_client_id
+}
 
+locals {
+  # The RBAC role is granted to: the created SP, the existing SP, or a human
+  # user/group (defaulting to whoever runs Terraform) for interactive_user mode.
+  arc_role_principal_id = (
+    local.arc_create_sp ? azuread_service_principal.arc_onboarding[0].object_id :
+    local.arc_use_existing ? data.azuread_service_principal.existing_arc_onboarding[0].object_id :
+    var.interactive_onboarding_principal_id != "" ? var.interactive_onboarding_principal_id :
+    data.azurerm_client_config.current.object_id
+  )
+}
+
+# Role assignment runs unconditionally - every method needs this least-
+# privilege role at the RG scope, whether held by a service principal or a
+# human user. Assigning RBAC roles needs Owner/User Access Administrator -
+# a separate permission model from Entra ID app/SP creation.
+resource "azurerm_role_assignment" "arc_onboarding" {
   scope                = azurerm_resource_group.main.id
   role_definition_name = "Azure Connected Machine Onboarding"
-  principal_id         = azuread_service_principal.arc_onboarding[0].object_id
+  principal_id         = local.arc_role_principal_id
 }
 
 # Give Entra ID / RBAC a few seconds to propagate before azcmagent connect
 # runs on the VMs. This is a real, documented Azure AD/RBAC propagation delay,
 # not an arbitrary workaround - see README "Known limitations".
 resource "time_sleep" "role_assignment_propagation" {
-  count           = var.create_arc_service_principal ? 1 : 0
   depends_on      = [azurerm_role_assignment.arc_onboarding]
   create_duration = "30s"
 }
 
 locals {
   # Resolve the credentials actually used for Arc onboarding: either the
-  # Terraform-created service principal, or an existing one supplied by the caller.
-  arc_sp_client_id = var.create_arc_service_principal ? azuread_application.arc_onboarding[0].client_id : var.arc_service_principal_client_id
-  arc_sp_secret    = var.create_arc_service_principal ? azuread_service_principal_password.arc_onboarding[0].value : var.arc_service_principal_secret
+  # Terraform-created service principal, or an existing one supplied by the
+  # caller. Left as empty strings in interactive_user mode - the module skips
+  # the automated connect step entirely in that case.
+  arc_sp_client_id = local.arc_create_sp ? azuread_application.arc_onboarding[0].client_id : var.arc_service_principal_client_id
+  arc_sp_secret    = local.arc_create_sp ? azuread_service_principal_password.arc_onboarding[0].value : var.arc_service_principal_secret
 }
 
 ############################################
@@ -139,6 +191,7 @@ module "arc_onboarding" {
 
   service_principal_client_id = local.arc_sp_client_id
   service_principal_secret    = local.arc_sp_secret
+  interactive_mode            = local.arc_interactive
 
   tags = local.vm_tags[each.key]
 

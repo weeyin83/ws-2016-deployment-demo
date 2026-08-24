@@ -71,13 +71,15 @@ locals {
   # Per-VM tags layered on top of common_tags, clearly distinguishing Arc
   # evaluation resources from native Azure resources and recording the
   # Windows Server edition, as required for governance/reporting.
+  # NOTE: tag key is "osEdition", not "windowsServerEdition" - Azure rejects
+  # any tag NAME starting with the reserved prefixes microsoft/azure/windows.
   vm_tags = {
     for k, v in local.vm_configs : k => merge(
       local.common_tags,
       {
-        managementType       = v.management_type
-        windowsServerEdition = v.os_edition
-        arcEvaluationOnly    = v.management_type == "arc-evaluation" ? "true" : "false"
+        managementType    = v.management_type
+        osEdition         = v.os_edition
+        arcEvaluationOnly = v.management_type == "arc-evaluation" ? "true" : "false"
       },
       v.additional_tags
     )

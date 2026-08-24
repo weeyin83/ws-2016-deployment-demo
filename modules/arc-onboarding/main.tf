@@ -20,6 +20,12 @@
 # Terraform/Azure-side sleep) lets the extension finish and report success
 # first, and is the only reliable way to sequence "disable the thing that is
 # currently running you" from inside a CustomScriptExtension.
+#
+# When interactive_mode = true, steps 3-5 are skipped entirely: azcmagent
+# connect requires an interactive device-code/browser login that cannot run
+# unattended inside a CustomScriptExtension. Only steps 1-2 run automatically;
+# a human must then RDP/Serial-Console in and run
+# scripts/Complete-InteractiveArcOnboarding.ps1 to finish onboarding.
 ############################################
 
 variable "vm_id" {
@@ -50,13 +56,23 @@ variable "tenant_id" {
 }
 
 variable "service_principal_client_id" {
-  type      = string
-  sensitive = true
+  description = "Empty when interactive_mode = true (no service principal is used)."
+  type        = string
+  sensitive   = true
+  default     = ""
 }
 
 variable "service_principal_secret" {
-  type      = string
-  sensitive = true
+  description = "Empty when interactive_mode = true (no service principal is used)."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "interactive_mode" {
+  description = "If true, the extension only preps the VM and installs the Connected Machine agent - it does NOT run azcmagent connect (which requires an interactive device-code login). Use scripts/Complete-InteractiveArcOnboarding.ps1 manually afterwards."
+  type        = bool
+  default     = false
 }
 
 variable "tags" {
@@ -76,6 +92,7 @@ locals {
     sp_client_id        = var.service_principal_client_id
     sp_secret           = var.service_principal_secret
     arc_machine_name    = local.arc_machine_name
+    interactive_mode    = tostring(var.interactive_mode)
   })
 }
 
@@ -88,12 +105,14 @@ resource "azurerm_virtual_machine_extension" "arc_onboarding" {
   auto_upgrade_minor_version = true
   tags                       = var.tags
 
-  # "script" (base64-encoded full script body) is used instead of
-  # commandToExecute + fileUris so no script content or secrets are ever
-  # written to a publicly reachable storage location - everything is
-  # embedded directly in the (sensitive) extension settings.
+  # Windows CustomScriptExtension requires "commandToExecute" (unlike the
+  # Linux variant, it has no standalone "script" property). The script body
+  # is passed inline via PowerShell's -EncodedCommand (base64 of UTF-16LE
+  # text) so no script content or secrets are ever written to a publicly
+  # reachable storage location - everything stays in the (sensitive)
+  # protected_settings, never in the public settings or command-line logs.
   protected_settings = jsonencode({
-    script = base64encode(local.onboarding_script)
+    commandToExecute = "powershell -NoProfile -ExecutionPolicy Unrestricted -EncodedCommand ${textencodebase64(local.onboarding_script, "UTF-16LE")}"
   })
 
   # Terraform state will contain this rendered script, including the
@@ -104,11 +123,13 @@ resource "azurerm_virtual_machine_extension" "arc_onboarding" {
   }
 }
 
-# Reads back the Arc-enabled server resource created by azcmagent connect
-# once the extension has finished running. Depends explicitly on the
-# extension reaching a terminal state so the machine resource is guaranteed
-# to already exist in ARM.
+# Reads back the Arc-enabled server resource created by azcmagent connect once
+# the extension has finished running. Skipped in interactive_mode, since the
+# machine resource doesn't exist yet - the human still has to complete the
+# connect step themselves (see scripts/Complete-InteractiveArcOnboarding.ps1).
 data "azurerm_arc_machine" "main" {
+  count = var.interactive_mode ? 0 : 1
+
   name                = local.arc_machine_name
   resource_group_name = var.resource_group_name
 
@@ -116,7 +137,7 @@ data "azurerm_arc_machine" "main" {
 }
 
 output "arc_machine_resource_id" {
-  value = data.azurerm_arc_machine.main.id
+  value = var.interactive_mode ? "not-yet-connected: run scripts/Complete-InteractiveArcOnboarding.ps1 on ${var.vm_name}" : data.azurerm_arc_machine.main[0].id
 }
 
 output "extension_id" {

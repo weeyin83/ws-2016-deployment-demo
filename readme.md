@@ -175,15 +175,71 @@ manageable via normal Azure VM extension operations.
 | Create the onboarding service principal             | `Application Administrator` (or `Application Developer` + admin consent) in Microsoft Entra ID                                               |
 | Assign the onboarding role to the service principal | `User Access Administrator` or `Owner` on the resource group                                                                                 |
 
-## 10. Arc onboarding service principal
+## 10. Arc onboarding authentication method
 
-By default (`create_arc_service_principal = true`), Terraform creates a dedicated Entra
-ID application + service principal, assigns it **only** the built-in
+Set via `arc_onboarding_method`, one of three mutually-exclusive values:
+
+| Method                            | What it needs                                                                               | Automation level                                                             |
+| --------------------------------- | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `service_principal_new` (default) | `Application Administrator`/`Cloud Application Administrator` in Entra ID                   | Fully automated                                                              |
+| `service_principal_existing`      | An SP created out-of-band; only `Owner`/`User Access Administrator` on the RG for Terraform | Fully automated                                                              |
+| `interactive_user`                | Only `Owner`/`User Access Administrator` on the RG for Terraform                            | Prep + agent install automated; `azcmagent connect` is a manual, per-VM step |
+
+**`service_principal_new`** (default): Terraform creates a dedicated Entra ID
+application + service principal, assigns it **only** the built-in
 `Azure Connected Machine Onboarding` role at the resource group scope, and generates a
 short-lived (24h) client secret used solely to run `azcmagent connect` on the three Arc
-evaluation VMs. If you already have a service principal (or lack permission to create
-one), set `create_arc_service_principal = false` and supply
-`arc_service_principal_client_id` / `arc_service_principal_secret` instead (see §12).
+evaluation VMs.
+
+**If `terraform apply` fails with:**
+```
+Error: Could not create service principal
+... 403 Forbidden ... Authorization_RequestDenied: When using this permission, the
+backing application of the service principal being created must in the local tenant
+```
+This message is misleading - the real cause is almost always that your account **lacks
+the Entra ID permission to create service principals** (it requires the `Application
+Administrator` or `Cloud Application Administrator` directory role, or the
+`Application.ReadWrite.All` Graph permission). Check your roles with:
+```bash
+az rest --method get --url "https://graph.microsoft.com/v1.0/me/memberOf" --query "value[].displayName" -o tsv
+```
+If you only have read-only roles (e.g. `Global Reader`):
+
+**`service_principal_existing`** - create the service principal yourself out-of-band and
+let Terraform only *read* and use it (reading via a data source requires no special
+Entra role, only *creating* one does):
+```bash
+az ad sp create-for-rbac --name "spn-ws16arc-demo-swc-01-arc-onboarding" --skip-assignment
+```
+Then set `arc_onboarding_method = "service_principal_existing"` in `terraform.tfvars` and export:
+```bash
+export TF_VAR_arc_service_principal_client_id='<appId from above>'
+export TF_VAR_arc_service_principal_secret='<password from above>'
+```
+
+**`interactive_user`** - use this if even `az ad sp create-for-rbac` fails with
+`Insufficient privileges to complete the operation` (the tenant blocks app/SP creation
+entirely for your account, common in locked-down eval/sandbox tenants). No Entra ID app
+or service principal is created at all. Instead:
+1. Set `arc_onboarding_method = "interactive_user"` in `terraform.tfvars`. Terraform
+   grants the `Azure Connected Machine Onboarding` RBAC role directly to your own
+   account (or to `interactive_onboarding_principal_id` if you set one) - this only needs
+   `Owner`/`User Access Administrator` on the resource group, a completely different
+   permission model from Entra ID app creation.
+2. `terraform apply` completes prep (MSFT_ARC_TEST, firewall rules) and installs the
+   Connected Machine agent automatically on `arc-vm01/02/03`, but does **not** run
+   `azcmagent connect` - that step requires an interactive device-code/browser login,
+   which cannot run unattended inside a CustomScriptExtension.
+3. For each Arc evaluation VM, RDP or Serial-Console in and run:
+   ```powershell
+   .\scripts\Complete-InteractiveArcOnboarding.ps1 -TenantId '<tenant-id>' `
+     -SubscriptionId '<subscription-id>' -ResourceGroupName '<rg-name>' `
+     -Location 'swedencentral' -ResourceName '<computer-name, e.g. arcvm01>'
+   ```
+   This prompts a device-code URL/code - sign in with the account that was granted the
+   RBAC role in step 1. It then schedules the same deferred Guest Agent disable used by
+   the automated methods.
 
 ## 11. Secure credential configuration
 
@@ -194,10 +250,11 @@ export TF_VAR_admin_password='choose-a-strong-password-12+chars'
 export TF_VAR_subscription_id="$(az account show --query id -o tsv)"
 export TF_VAR_tenant_id="$(az account show --query tenantId -o tsv)"
 
-# Only if create_arc_service_principal = false:
+# Only if arc_onboarding_method = "service_principal_existing":
 export TF_VAR_arc_service_principal_client_id='...'
 export TF_VAR_arc_service_principal_secret='...'
 ```
+
 
 `admin_password` and both service-principal variables are marked `sensitive = true` and
 are never written to outputs.
@@ -262,14 +319,16 @@ firewall rules, Guest Agent status, and `azcmagent show` all pass.
 
 ## 17. Troubleshooting
 
-| Symptom                                               | Likely cause / fix                                                                                                                                                                                                       |
-| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `SkuNotFound` deploying the VM image                  | Marketplace catalog changed - re-run §13's verification command                                                                                                                                                          |
-| CustomScriptExtension stuck "Creating"/never succeeds | Check `C:\ArcEvaluation\onboarding.log` via Serial Console; agent may have been disabled prematurely, or outbound HTTPS is blocked                                                                                       |
-| `azcmagent connect` fails with auth error             | Confirm the service principal's `Azure Connected Machine Onboarding` role assignment has propagated (Terraform waits 30s automatically via `time_sleep`); re-run `scripts/Connect-AzureArcServer.ps1` manually if needed |
-| Outbound connectivity failures during onboarding      | NSG default outbound rules already allow HTTPS; check no custom NSG/firewall changes were made outside this config                                                                                                       |
-| IMDS still reachable after "prep" step                | Confirm firewall rules exist: `Get-NetFirewallRule -DisplayName Block-Outbound-*`                                                                                                                                        |
-| Can't RDP to any VM                                   | Expected - no public IP/Bastion/VPN by default. Enable `enable_public_ip`/`enable_public_rdp` for one VM temporarily (§14)                                                                                               |
+| Symptom                                                                                   | Likely cause / fix                                                                                                                                                                                                                         |
+| ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `SkuNotFound` deploying the VM image                                                      | Marketplace catalog changed - re-run §13's verification command                                                                                                                                                                            |
+| `Could not create service principal` / 403 "must be in the local tenant"                  | Misleading message - your account lacks `Application Administrator`/`Application.ReadWrite.All`. Switch to `arc_onboarding_method = "service_principal_existing"` or `"interactive_user"` - see §10.                                       |
+| `az ad sp create-for-rbac` fails with "Insufficient privileges to complete the operation" | Your tenant blocks app/SP creation entirely for this account. Use `arc_onboarding_method = "interactive_user"` instead - see §10.                                                                                                          |
+| CustomScriptExtension stuck "Creating"/never succeeds                                     | Check `C:\ArcEvaluation\onboarding.log` via Serial Console; agent may have been disabled prematurely, or outbound HTTPS is blocked                                                                                                         |
+| `azcmagent connect` fails with auth error                                                 | Confirm the RBAC role assignment has propagated (Terraform waits 30s automatically via `time_sleep`); re-run `scripts/Connect-AzureArcServer.ps1` (SP) or `scripts/Complete-InteractiveArcOnboarding.ps1` (interactive) manually if needed |
+| Outbound connectivity failures during onboarding                                          | NSG default outbound rules already allow HTTPS; check no custom NSG/firewall changes were made outside this config                                                                                                                         |
+| IMDS still reachable after "prep" step                                                    | Confirm firewall rules exist: `Get-NetFirewallRule -DisplayName Block-Outbound-*`                                                                                                                                                          |
+| Can't RDP to any VM                                                                       | Expected - no public IP/Bastion/VPN by default. Enable `enable_public_ip`/`enable_public_rdp` for one VM temporarily (§14)                                                                                                                 |
 
 ## 18. Security considerations
 

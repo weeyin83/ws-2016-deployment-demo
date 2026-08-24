@@ -185,28 +185,66 @@ variable "auto_shutdown_timezone" {
 }
 
 ############################################
-# Arc onboarding service principal
+# Arc onboarding authentication method
 ############################################
+# Three mutually exclusive ways to authenticate azcmagent connect on the
+# three Arc evaluation VMs, in decreasing order of automation:
+#   - "service_principal_new"      : Terraform creates the Entra app/SP (needs
+#                                    Application Administrator/equivalent).
+#   - "service_principal_existing" : you supply an already-created SP (needs
+#                                    no Entra admin role, only someone who can
+#                                    create app registrations to have made it).
+#   - "interactive_user"           : no Entra app/SP at all. Terraform grants
+#                                    the RBAC role directly to a user/group
+#                                    (Azure RBAC only - no Entra admin role
+#                                    needed), and a human runs `azcmagent
+#                                    connect` interactively (device code login)
+#                                    via RDP/Serial Console. Use this when your
+#                                    tenant blocks app/SP creation entirely
+#                                    (e.g. "Insufficient privileges" from
+#                                    `az ad sp create-for-rbac`).
 
-variable "create_arc_service_principal" {
-  description = "If true, Terraform creates a dedicated Microsoft Entra application/service principal (via the azuread provider) scoped only to the Arc onboarding role, for use by the three Arc evaluation VMs. Requires Application Administrator (or equivalent) permission in Entra ID. If false, supply an existing service principal via arc_service_principal_client_id/secret."
-  type        = bool
-  default     = true
+variable "arc_onboarding_method" {
+  description = "How the three Arc evaluation VMs authenticate Azure Arc onboarding: 'service_principal_new', 'service_principal_existing', or 'interactive_user'."
+  type        = string
+  default     = "service_principal_new"
+
+  validation {
+    condition     = contains(["service_principal_new", "service_principal_existing", "interactive_user"], var.arc_onboarding_method)
+    error_message = "arc_onboarding_method must be one of: service_principal_new, service_principal_existing, interactive_user."
+  }
 }
 
 variable "arc_service_principal_client_id" {
-  description = "Client (application) ID of an existing service principal to use for Arc onboarding, when create_arc_service_principal = false."
+  description = "Client (application) ID of an existing service principal to use for Arc onboarding, when arc_onboarding_method = 'service_principal_existing'."
   type        = string
   default     = ""
   sensitive   = true
+
+  validation {
+    condition     = var.arc_onboarding_method != "service_principal_existing" || length(var.arc_service_principal_client_id) > 0
+    error_message = "arc_service_principal_client_id must be set when arc_onboarding_method = 'service_principal_existing'."
+  }
 }
 
 variable "arc_service_principal_secret" {
-  description = "Client secret of an existing service principal to use for Arc onboarding, when create_arc_service_principal = false."
+  description = "Client secret of an existing service principal to use for Arc onboarding, when arc_onboarding_method = 'service_principal_existing'."
   type        = string
   default     = ""
   sensitive   = true
+
+  validation {
+    condition     = var.arc_onboarding_method != "service_principal_existing" || length(var.arc_service_principal_secret) > 0
+    error_message = "arc_service_principal_secret must be set when arc_onboarding_method = 'service_principal_existing'."
+  }
 }
+
+variable "interactive_onboarding_principal_id" {
+  description = "Microsoft Entra object ID of the user/group to grant the 'Azure Connected Machine Onboarding' RBAC role to, when arc_onboarding_method = 'interactive_user'. Leave empty to default to the identity currently running Terraform (az login / ARM_* credentials)."
+  type        = string
+  default     = ""
+}
+
 
 ############################################
 # VM configuration map
