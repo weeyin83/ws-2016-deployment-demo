@@ -39,6 +39,67 @@ module "network" {
 }
 
 ############################################
+# Arc onboarding script staging storage account
+#
+# The onboarding script (prep + agent install + connect logic) is too large
+# to pass inline via the CustomScriptExtension's commandToExecute - Windows
+# CSE always runs via "cmd /c <commandToExecute>", and cmd.exe hard-limits
+# command lines to 8191 characters ("The command line is too long."). A tiny,
+# low-cost Standard_LRS storage account + private container is used instead
+# to stage each VM's rendered script as a blob.
+#
+# This subscription enforces shared-key auth to be disabled on storage
+# accounts (KeyBasedAuthenticationNotPermitted), so both the Terraform-side
+# blob upload and the VM-side download use Azure AD identities instead of
+# account keys/SAS tokens:
+#   - Terraform uploads via the caller's own Azure AD identity (see
+#     storage_use_azuread in providers.tf) - needs Storage Blob Data
+#     Contributor, granted below.
+#   - Each Arc VM downloads its script using its own system-assigned managed
+#     identity (granted Storage Blob Data Reader in modules/arc-onboarding).
+############################################
+
+resource "random_string" "storage_suffix" {
+  length  = 6
+  special = false
+  upper   = false
+}
+
+resource "azurerm_storage_account" "arc_scripts" {
+  name                = substr("st${var.workload_name}${var.instance}${random_string.storage_suffix.result}", 0, 24)
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
+
+  account_tier              = "Standard"
+  account_replication_type  = "LRS"
+  min_tls_version           = "TLS1_2"
+  shared_access_key_enabled = false
+
+  tags = local.common_tags
+}
+
+# Lets Terraform itself (via storage_use_azuread) manage containers/blobs on
+# an account that has shared-key auth disabled.
+resource "azurerm_role_assignment" "terraform_storage_data" {
+  scope                = azurerm_storage_account.arc_scripts.id
+  role_definition_name = "Storage Blob Data Contributor"
+  principal_id         = data.azurerm_client_config.current.object_id
+}
+
+resource "time_sleep" "terraform_storage_data_propagation" {
+  depends_on      = [azurerm_role_assignment.terraform_storage_data]
+  create_duration = "30s"
+}
+
+resource "azurerm_storage_container" "arc_scripts" {
+  name                  = "arc-onboarding-scripts"
+  storage_account_id    = azurerm_storage_account.arc_scripts.id
+  container_access_type = "private"
+
+  depends_on = [time_sleep.terraform_storage_data_propagation]
+}
+
+############################################
 # Arc onboarding identity - one of three methods (see variables.tf for the
 # full decision guide): a Terraform-created service principal, an existing
 # caller-supplied service principal, or an interactively-connected human user.
@@ -166,6 +227,11 @@ module "windows_vm" {
 
   enable_public_ip = each.value.enable_public_ip
 
+  # Only Arc evaluation VMs get a managed identity, used solely to download
+  # their onboarding script from storage (see arc_scripts storage account
+  # above) - native VMs are left completely unmodified.
+  enable_system_identity = each.value.management_type == "arc-evaluation"
+
   auto_shutdown_enabled  = each.value.auto_shutdown_enabled
   auto_shutdown_time     = each.value.auto_shutdown_time
   auto_shutdown_timezone = var.auto_shutdown_timezone
@@ -192,6 +258,10 @@ module "arc_onboarding" {
   service_principal_client_id = local.arc_sp_client_id
   service_principal_secret    = local.arc_sp_secret
   interactive_mode            = local.arc_interactive
+
+  storage_account_id   = azurerm_storage_account.arc_scripts.id
+  storage_container_id = azurerm_storage_container.arc_scripts.id
+  vm_principal_id      = module.windows_vm[each.key].system_identity_principal_id
 
   tags = local.vm_tags[each.key]
 

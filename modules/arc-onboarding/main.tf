@@ -75,6 +75,21 @@ variable "interactive_mode" {
   default     = false
 }
 
+variable "storage_account_id" {
+  description = "Resource ID of the shared storage account, used to scope the VM's Storage Blob Data Reader role assignment."
+  type        = string
+}
+
+variable "storage_container_id" {
+  description = "Resource ID of the shared blob container used to stage this VM's onboarding script (too large to inline via commandToExecute)."
+  type        = string
+}
+
+variable "vm_principal_id" {
+  description = "Object ID of the VM's system-assigned managed identity, used to authenticate the script download (this subscription disables storage account keys/SAS tokens)."
+  type        = string
+}
+
 variable "tags" {
   type = map(string)
 }
@@ -94,6 +109,37 @@ locals {
     arc_machine_name    = local.arc_machine_name
     interactive_mode    = tostring(var.interactive_mode)
   })
+
+  onboarding_script_blob_name = "arc-onboarding-${var.vm_name}.ps1"
+}
+
+# Fixed once at creation (not data-source-derived from timestamp()), so this
+# module's transient resources don't churn on every re-apply.
+resource "azurerm_storage_blob" "onboarding_script" {
+  name                 = local.onboarding_script_blob_name
+  storage_container_id = var.storage_container_id
+  type                 = "Block"
+  source_content       = local.onboarding_script
+  content_type         = "text/plain; charset=utf-8"
+}
+
+# Lets the VM's own managed identity read (only) this one blob - this
+# subscription disables storage account keys/SAS tokens
+# (KeyBasedAuthenticationNotPermitted), so Azure AD + managed identity is the
+# only way for the VM extension agent to download the script.
+resource "azurerm_role_assignment" "vm_storage_reader" {
+  scope                = var.storage_account_id
+  role_definition_name = "Storage Blob Data Reader"
+  principal_id         = var.vm_principal_id
+}
+
+resource "time_sleep" "vm_storage_reader_propagation" {
+  depends_on      = [azurerm_role_assignment.vm_storage_reader]
+  create_duration = "30s"
+}
+
+locals {
+  onboarding_script_url = azurerm_storage_blob.onboarding_script.url
 }
 
 resource "azurerm_virtual_machine_extension" "arc_onboarding" {
@@ -105,15 +151,24 @@ resource "azurerm_virtual_machine_extension" "arc_onboarding" {
   auto_upgrade_minor_version = true
   tags                       = var.tags
 
-  # Windows CustomScriptExtension requires "commandToExecute" (unlike the
-  # Linux variant, it has no standalone "script" property). The script body
-  # is passed inline via PowerShell's -EncodedCommand (base64 of UTF-16LE
-  # text) so no script content or secrets are ever written to a publicly
-  # reachable storage location - everything stays in the (sensitive)
-  # protected_settings, never in the public settings or command-line logs.
-  protected_settings = jsonencode({
-    commandToExecute = "powershell -NoProfile -ExecutionPolicy Unrestricted -EncodedCommand ${textencodebase64(local.onboarding_script, "UTF-16LE")}"
+  # Windows CustomScriptExtension always requires "commandToExecute", and
+  # cmd.exe (which the agent uses to run it) hard-limits command lines to
+  # 8191 characters - far too small to inline this script directly (it fails
+  # at runtime with "The command line is too long.", not at plan/apply time).
+  # The script is staged as a blob instead and downloaded via fileUris,
+  # authenticated with the VM's own managed identity (managedIdentity = {})
+  # rather than a SAS token, since this subscription disables storage
+  # account key-based auth entirely.
+  settings = jsonencode({
+    fileUris        = [local.onboarding_script_url]
+    managedIdentity = {}
   })
+
+  protected_settings = jsonencode({
+    commandToExecute = "powershell -ExecutionPolicy Unrestricted -File \"${local.onboarding_script_blob_name}\""
+  })
+
+  depends_on = [time_sleep.vm_storage_reader_propagation]
 
   # Terraform state will contain this rendered script, including the
   # service principal secret, in plaintext unless you use an encrypted /

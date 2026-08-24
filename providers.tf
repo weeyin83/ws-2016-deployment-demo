@@ -17,12 +17,18 @@ provider "azurerm" {
     }
   }
 
+  # This subscription enforces "shared key access disabled" on storage
+  # accounts (Azure Policy), so container/blob data-plane operations must use
+  # Azure AD (your az login / ARM_* identity) instead of the storage account
+  # key. Requires the "Storage Blob Data Contributor" role - see main.tf.
+  storage_use_azuread = true
+
   subscription_id = var.subscription_id
   tenant_id       = var.tenant_id
 }
 
-# Only required when var.create_arc_service_principal = true, so that Terraform
-# can register the Entra ID application/service principal used for Arc onboarding.
+# Only required when var.arc_onboarding_method = "service_principal_new", so that
+# Terraform can register the Entra ID application/service principal used for Arc onboarding.
 provider "azuread" {
   tenant_id = var.tenant_id
 }

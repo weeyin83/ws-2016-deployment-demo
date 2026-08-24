@@ -51,18 +51,30 @@ graph TB
 
 ## 3. Resource inventory
 
-| Resource                       | Count        | Notes                                                 |
-| ------------------------------ | ------------ | ----------------------------------------------------- |
-| Resource group                 | 1            | Dedicated to this demo                                |
-| Virtual network + subnet       | 1 each       | Shared by all 5 VMs                                   |
-| Network security group         | 1            | Subnet-level, minimum required rules                  |
-| Windows VMs                    | 5            | Single reusable module, `for_each`                    |
-| NICs                           | 5            | One per VM                                            |
-| Public IPs                     | 0 by default | Opt-in per VM                                         |
-| Auto-shutdown schedules        | Up to 5      | Free `Microsoft.DevTestLab/schedules`, opt-out per VM |
-| CustomScriptExtension          | 3            | Arc evaluation VMs only                               |
-| Entra ID app/service principal | 1 (optional) | Least-privilege Arc onboarding identity               |
-| Role assignment                | 1 (optional) | "Azure Connected Machine Onboarding" at RG scope      |
+| Resource                       | Count        | Notes                                                  |
+| ------------------------------ | ------------ | ------------------------------------------------------ |
+| Resource group                 | 1            | Dedicated to this demo                                 |
+| Virtual network + subnet       | 1 each       | Shared by all 5 VMs                                    |
+| Network security group         | 1            | Subnet-level, minimum required rules                   |
+| Windows VMs                    | 5            | Single reusable module, `for_each`                     |
+| NICs                           | 5            | One per VM                                             |
+| Public IPs                     | 0 by default | Opt-in per VM                                          |
+| Auto-shutdown schedules        | Up to 5      | Free `Microsoft.DevTestLab/schedules`, opt-out per VM  |
+| CustomScriptExtension          | 3            | Arc evaluation VMs only                                |
+| Storage account + container    | 1 each       | Stages onboarding scripts (see below); tiny, cheap     |
+| Storage blobs                  | 3            | One per Arc evaluation VM's rendered onboarding script |
+| Entra ID app/service principal | 1 (optional) | Least-privilege Arc onboarding identity                |
+| Role assignment                | 1 (optional) | "Azure Connected Machine Onboarding" at RG scope       |
+
+The storage account exists solely because the onboarding script is too large to inline
+directly into the CustomScriptExtension's `commandToExecute` (Windows CSE always runs it
+via `cmd /c`, which hard-limits command lines to 8191 characters). Each Arc VM's
+rendered script is uploaded as a private blob and downloaded using the VM's own
+system-assigned managed identity (`Storage Blob Data Reader`, RBAC-scoped to just this
+storage account) - no storage account keys or SAS tokens are used at all, since this
+subscription enforces `shared_access_key_enabled = false` on storage accounts. This is a
+small, low-cost `Standard_LRS` account - not the same thing as the boot diagnostics
+storage this design deliberately avoids.
 
 No Bastion, Firewall, NAT Gateway, Load Balancer, Backup, Defender plans, or Log Analytics
 are deployed.
@@ -319,16 +331,19 @@ firewall rules, Guest Agent status, and `azcmagent show` all pass.
 
 ## 17. Troubleshooting
 
-| Symptom                                                                                   | Likely cause / fix                                                                                                                                                                                                                         |
-| ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `SkuNotFound` deploying the VM image                                                      | Marketplace catalog changed - re-run §13's verification command                                                                                                                                                                            |
-| `Could not create service principal` / 403 "must be in the local tenant"                  | Misleading message - your account lacks `Application Administrator`/`Application.ReadWrite.All`. Switch to `arc_onboarding_method = "service_principal_existing"` or `"interactive_user"` - see §10.                                       |
-| `az ad sp create-for-rbac` fails with "Insufficient privileges to complete the operation" | Your tenant blocks app/SP creation entirely for this account. Use `arc_onboarding_method = "interactive_user"` instead - see §10.                                                                                                          |
-| CustomScriptExtension stuck "Creating"/never succeeds                                     | Check `C:\ArcEvaluation\onboarding.log` via Serial Console; agent may have been disabled prematurely, or outbound HTTPS is blocked                                                                                                         |
-| `azcmagent connect` fails with auth error                                                 | Confirm the RBAC role assignment has propagated (Terraform waits 30s automatically via `time_sleep`); re-run `scripts/Connect-AzureArcServer.ps1` (SP) or `scripts/Complete-InteractiveArcOnboarding.ps1` (interactive) manually if needed |
-| Outbound connectivity failures during onboarding                                          | NSG default outbound rules already allow HTTPS; check no custom NSG/firewall changes were made outside this config                                                                                                                         |
-| IMDS still reachable after "prep" step                                                    | Confirm firewall rules exist: `Get-NetFirewallRule -DisplayName Block-Outbound-*`                                                                                                                                                          |
-| Can't RDP to any VM                                                                       | Expected - no public IP/Bastion/VPN by default. Enable `enable_public_ip`/`enable_public_rdp` for one VM temporarily (§14)                                                                                                                 |
+| Symptom                                                                                   | Likely cause / fix                                                                                                                                                                                                                                                                                                                             |
+| ----------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SkuNotFound` deploying the VM image                                                      | Marketplace catalog changed - re-run §13's verification command                                                                                                                                                                                                                                                                                |
+| `Could not create service principal` / 403 "must be in the local tenant"                  | Misleading message - your account lacks `Application Administrator`/`Application.ReadWrite.All`. Switch to `arc_onboarding_method = "service_principal_existing"` or `"interactive_user"` - see §10.                                                                                                                                           |
+| `az ad sp create-for-rbac` fails with "Insufficient privileges to complete the operation" | Your tenant blocks app/SP creation entirely for this account. Use `arc_onboarding_method = "interactive_user"` instead - see §10.                                                                                                                                                                                                              |
+| CustomScriptExtension stuck "Creating"/never succeeds                                     | Check `C:\ArcEvaluation\onboarding.log` via Serial Console; agent may have been disabled prematurely, or outbound HTTPS is blocked                                                                                                                                                                                                             |
+| `VMExtensionProvisioningError` "The command line is too long"                             | The script exceeded cmd.exe's 8191-character limit for `commandToExecute` - already fixed by staging the script via the storage account/blob instead of inlining it. If you see this after further editing the template, the script grew too large again - keep large logic in the blob-staged script, not in `commandToExecute` directly.     |
+| `KeyBasedAuthenticationNotPermitted` creating the storage account/container/blob          | Your subscription enforces an Azure Policy disabling storage account keys. Already handled: the storage account sets `shared_access_key_enabled = false`, Terraform uses Azure AD (`storage_use_azuread = true` in providers.tf) to manage blobs, and each Arc VM downloads its script via its own managed identity - no keys or SAS involved. |
+| `a resource ... already exists ... needs to be imported` for the extension                | A previous failed apply still created the extension in Azure (in a `Failed` state) even though Terraform didn't record it in state. Run `terraform import 'module.arc_onboarding["<vm-name>"].azurerm_virtual_machine_extension.arc_onboarding' '<resource-id>'` for each affected VM, then re-plan/apply.                                     |
+| `azcmagent connect` fails with auth error                                                 | Confirm the RBAC role assignment has propagated (Terraform waits 30s automatically via `time_sleep`); re-run `scripts/Connect-AzureArcServer.ps1` (SP) or `scripts/Complete-InteractiveArcOnboarding.ps1` (interactive) manually if needed                                                                                                     |
+| Outbound connectivity failures during onboarding                                          | NSG default outbound rules already allow HTTPS; check no custom NSG/firewall changes were made outside this config                                                                                                                                                                                                                             |
+| IMDS still reachable after "prep" step                                                    | Confirm firewall rules exist: `Get-NetFirewallRule -DisplayName Block-Outbound-*`                                                                                                                                                                                                                                                              |
+| Can't RDP to any VM                                                                       | Expected - no public IP/Bastion/VPN by default. Enable `enable_public_ip`/`enable_public_rdp` for one VM temporarily (§14)                                                                                                                                                                                                                     |
 
 ## 18. Security considerations
 
@@ -379,6 +394,8 @@ account key in committed files.
 - **Marketplace image licensing** for Windows Server 2016 Datacenter, included in the
   VM's pay-as-you-go price unless `enable_azure_hybrid_benefit = true` (requires you to
   already hold qualifying licences - never enabled by default).
+- **Storage account** (Standard_LRS) used only to stage the three onboarding scripts as
+  small blobs - negligible cost (a few KB of data, no ongoing traffic after onboarding).
 - No Bastion, Firewall, NAT Gateway, Load Balancer, Backup, Defender, or Log Analytics
   costs are introduced by this configuration.
 
