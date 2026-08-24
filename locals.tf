@@ -49,6 +49,19 @@ locals {
       sku       = "2016-Datacenter"
       version   = "14393.9418.260809" # latest verified in swedencentral; consider "latest" if you re-verify regularly
     }
+    # Verified via `az vm image list --publisher MicrosoftSQLServer --offer
+    # SQL2016SP2-WS2016 --sku SQLDEV --location swedencentral` on 2026-08-24.
+    # SQL Server 2016 SP2 Developer edition on Windows Server 2016 - Developer
+    # is functionally identical to Enterprise (full feature set) but licensed
+    # free for non-production use, which matches this demo environment. Do not
+    # use this for production - see README for the Standard-edition PAYG
+    # alternative if you need to validate licensed-tier behavior.
+    "sql-server-2016-developer" = {
+      publisher = "MicrosoftSQLServer"
+      offer     = "SQL2016SP2-WS2016"
+      sku       = "SQLDEV"
+      version   = "13.2.230912" # latest verified in swedencentral
+    }
   }
 }
 
@@ -67,6 +80,10 @@ locals {
 
   arc_vm_configs    = { for k, v in local.vm_configs : k => v if v.management_type == "arc-evaluation" }
   native_vm_configs = { for k, v in local.vm_configs : k => v if v.management_type == "native-azure" }
+
+  # VMs running the SQL Server 2016 Developer image get the AdventureWorks2016
+  # demo database restored automatically - see modules/sql-demo-data.
+  sql_demo_vm_configs = { for k, v in local.vm_configs : k => v if v.os_edition == "sql-server-2016-developer" }
 
   # Per-VM tags layered on top of common_tags, clearly distinguishing Arc
   # evaluation resources from native Azure resources and recording the

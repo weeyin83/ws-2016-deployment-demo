@@ -257,7 +257,7 @@ variable "vm_configs" {
   description = "Map of VM key => configuration object. See README for full field descriptions."
   type = map(object({
     management_type         = string           # "arc-evaluation" | "native-azure"
-    os_edition              = string           # "windows-server-2016-datacenter" (only supported value - see README)
+    os_edition              = string           # "windows-server-2016-datacenter" | "sql-server-2016-developer" - see README
     vm_size                 = optional(string) # overrides default_vm_size when set
     enable_public_ip        = optional(bool, false)
     enable_public_rdp       = optional(bool, false)
@@ -297,10 +297,12 @@ variable "vm_configs" {
 
   validation {
     # Windows Server 2016 Standard is NOT published in the Azure Marketplace (verified
-    # empirically in Sweden Central and globally). Only Datacenter is available, so this
-    # is the only supported edition value. See README "Windows Server edition availability".
-    condition     = alltrue([for k, v in var.vm_configs : v.os_edition == "windows-server-2016-datacenter"])
-    error_message = "os_edition must be 'windows-server-2016-datacenter' - Windows Server 2016 Standard has no Azure Marketplace image and is not selectable."
+    # empirically in Sweden Central and globally). Only Datacenter is available. The
+    # SQL Server 2016 Developer edition image (bundles Windows Server 2016 + SQL Server
+    # 2016 Developer, free for non-production use) is the only other supported value.
+    # See README "Windows Server edition availability".
+    condition     = alltrue([for k, v in var.vm_configs : contains((["windows-server-2016-datacenter", "sql-server-2016-developer"]), v.os_edition)])
+    error_message = "os_edition must be 'windows-server-2016-datacenter' or 'sql-server-2016-developer' - no other Windows Server 2016 Marketplace image variants are verified/selectable."
   }
 
   validation {
