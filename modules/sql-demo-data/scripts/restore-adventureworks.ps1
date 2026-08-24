@@ -22,6 +22,16 @@ function Write-Step {
     Write-Output "==== $(Get-Date -Format o) - $Message ===="
 }
 
+function Wait-ForSqlConnection {
+    param([int]$Attempts = 12, [int]$DelaySeconds = 10)
+    for ($i = 0; $i -lt $Attempts; $i++) {
+        & sqlcmd -S localhost -Q "SET NOCOUNT ON; SELECT 1" *> $null
+        if ($LASTEXITCODE -eq 0) { return $true }
+        Start-Sleep -Seconds $DelaySeconds
+    }
+    return $false
+}
+
 try {
     # Grant the SQL Server Database Engine service account (default instance =
     # the well-known "NT SERVICE\MSSQLSERVER" virtual account on this
@@ -56,13 +66,41 @@ try {
     # Give the SQL Server service a little time to finish starting up after
     # VM boot before the first connection attempt (retried, not a fixed sleep).
     Write-Step "Waiting for SQL Server to accept connections"
-    $ready = $false
-    for ($i = 0; $i -lt 12; $i++) {
-        & sqlcmd -S localhost -Q "SET NOCOUNT ON; SELECT 1" *> $null
-        if ($LASTEXITCODE -eq 0) { $ready = $true; break }
-        Start-Sleep -Seconds 10
+    if (-not (Wait-ForSqlConnection)) { throw "SQL Server did not become available in time" }
+
+    # This CustomScriptExtension always runs as NT AUTHORITY\SYSTEM, which the
+    # Marketplace image's SQL Server instance grants a login to but NOT
+    # sysadmin - RESTORE FILELISTONLY/RESTORE DATABASE both require it. Rather
+    # than assume any particular admin account has sysadmin, grant it to
+    # SYSTEM using Microsoft's own documented recovery procedure (temporarily
+    # restart the engine in single-user mode, which treats the first
+    # connection as sysadmin): https://learn.microsoft.com/sql/database-engine/configure-windows/scenario-regain-access-to-a-server
+    Write-Step "Checking whether NT AUTHORITY\SYSTEM already has sysadmin"
+    $isSysadmin = (& sqlcmd -S localhost -h -1 -W -Q "SET NOCOUNT ON; SELECT CAST(IS_SRVROLEMEMBER('sysadmin') AS int)" | Select-Object -First 1).Trim()
+
+    if ($isSysadmin -ne "1") {
+        Write-Step "Granting NT AUTHORITY\SYSTEM sysadmin via single-user mode"
+        $instanceId = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL" -Name "MSSQLSERVER").MSSQLSERVER
+        $sqlBinRoot = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$instanceId\Setup" -Name "SQLBinRoot").SQLBinRoot
+        $sqlservrExe = Join-Path $sqlBinRoot "sqlservr.exe"
+
+        Stop-Service -Name "MSSQLSERVER" -Force
+        $singleUserProc = Start-Process -FilePath $sqlservrExe -ArgumentList '-m"SQLCMD"' -PassThru -WindowStyle Hidden
+        try {
+            if (-not (Wait-ForSqlConnection -Attempts 18 -DelaySeconds 5)) {
+                throw "SQL Server did not start in single-user mode"
+            }
+            & sqlcmd -S localhost -Q "ALTER SERVER ROLE sysadmin ADD MEMBER [NT AUTHORITY\SYSTEM]"
+            if ($LASTEXITCODE -ne 0) { throw "Failed to grant sysadmin to NT AUTHORITY\SYSTEM" }
+        } finally {
+            Stop-Process -Id $singleUserProc.Id -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 3
+            Start-Service -Name "MSSQLSERVER"
+        }
+
+        Write-Step "Waiting for SQL Server to accept connections after restart"
+        if (-not (Wait-ForSqlConnection)) { throw "SQL Server did not restart normally after granting sysadmin" }
     }
-    if (-not $ready) { throw "SQL Server did not become available in time" }
 
     Write-Step "Resolving default data/log paths and backup file list"
     $dataPath = (& sqlcmd -S localhost -h -1 -W -Q "SET NOCOUNT ON; SELECT CAST(SERVERPROPERTY('InstanceDefaultDataPath') AS nvarchar(260))" | Select-Object -First 1).Trim()
@@ -76,7 +114,8 @@ CREATE TABLE #filelist (
     Size numeric(20,0), MaxSize numeric(20,0), FileId bigint, CreateLSN numeric(25,0), DropLSN numeric(25,0),
     UniqueId uniqueidentifier, ReadOnlyLSN numeric(25,0), ReadWriteLSN numeric(25,0), BackupSizeInBytes bigint,
     SourceBlockSize int, FileGroupId int, LogGroupGUID uniqueidentifier, DifferentialBaseLSN numeric(25,0),
-    DifferentialBaseGUID uniqueidentifier, IsReadOnly bit, IsPresent bit, TDEThumbprint varbinary(32)
+    DifferentialBaseGUID uniqueidentifier, IsReadOnly bit, IsPresent bit, TDEThumbprint varbinary(32),
+    SnapshotURL nvarchar(360)
 );
 INSERT INTO #filelist EXEC('RESTORE FILELISTONLY FROM DISK = N''$bakPath''');
 SELECT LogicalName + '|' + Type FROM #filelist;
