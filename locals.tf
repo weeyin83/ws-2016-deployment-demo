@@ -66,6 +66,29 @@ locals {
 }
 
 ############################################
+# Verified Windows 11 Marketplace image (admin workstation)
+############################################
+# Verified via `az vm image list --publisher MicrosoftWindowsDesktop --offer
+# windows-11 --location swedencentral` on 2026-08-25. win11-24h2-pro is Gen2
+# and requires Trusted Launch (Secure Boot + vTPM) - handled in
+# modules/windows11-vm.
+#
+# IMPORTANT LICENSING NOTE: running a Windows 11 client OS image on Azure (a
+# multi-tenant cloud) requires the tenant/subscriber to hold qualifying
+# Windows/Microsoft 365 multi-tenant hosting rights (e.g. Windows 10/11
+# Enterprise E3/E5, Microsoft 365 E3/E5/F3, or Windows VDA). This is a
+# licensing requirement Terraform cannot verify or enforce - it is the
+# deploying user's responsibility to hold a qualifying licence.
+locals {
+  win11_image = {
+    publisher = "MicrosoftWindowsDesktop"
+    offer     = "windows-11"
+    sku       = "win11-24h2-pro"
+    version   = "26100.9168.260809" # latest verified in swedencentral
+  }
+}
+
+############################################
 # VM configuration - merge user input with defaults
 ############################################
 
@@ -101,4 +124,23 @@ locals {
       v.additional_tags
     )
   }
+}
+
+############################################
+# Windows 11 admin workstation naming/tags
+############################################
+
+locals {
+  # Windows NetBIOS computer_name allows at most 15 characters; keep this key
+  # short since computer_name is derived from it via replace(key, "-", "").
+  win11_vm_key = "win11-ws01"
+
+  win11_vm_tags = merge(
+    local.common_tags,
+    {
+      managementType = "admin-workstation"
+      osEdition      = "win11-24h2-pro"
+    },
+    var.win11_workstation.additional_tags
+  )
 }

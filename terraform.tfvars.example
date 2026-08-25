@@ -29,6 +29,19 @@ default_auto_shutdown_enabled = true
 default_auto_shutdown_time    = "1900"
 auto_shutdown_timezone        = "W. Europe Standard Time"
 
+# Optional Windows 11 admin workstation - RDP jumpbox in the same VNet/subnet
+# as the servers above, with Azure CLI, Power BI Desktop, and SQL Server
+# Management Studio pre-installed. Requires you to hold qualifying
+# Windows/Microsoft 365 multi-tenant hosting rights (e.g. Windows/M365 E3/E5,
+# Windows VDA) - see README. win11_trusted_rdp_source_cidr MUST be your own
+# public IP as a /32 (never 0.0.0.0/0).
+win11_trusted_rdp_source_cidr = "203.0.113.10/32" # replace with YOUR public IP/32
+
+win11_workstation = {
+  enabled = true
+  # license_type = "Windows_Client"  # uncomment if you hold qualifying multi-tenant hosting rights
+}
+
 # How the three Arc evaluation VMs authenticate onboarding. One of:
 #   "service_principal_new"      - Terraform creates the Entra app/SP (needs
 #                                  Application Administrator/equivalent).
