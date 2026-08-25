@@ -174,6 +174,19 @@ module "windows_vm" {
 }
 
 ############################################
+# SQL Server demo data - applied only to VMs using the sql-server-2016-developer image
+############################################
+
+module "sql_demo_data" {
+  for_each = local.sql_demo_vm_configs
+  source   = "./modules/sql-demo-data"
+
+  vm_id   = module.windows_vm[each.key].vm_id
+  vm_name = each.key
+  tags    = local.vm_tags[each.key]
+}
+
+############################################
 # Arc evaluation onboarding - applied only to management_type = arc-evaluation
 ############################################
 

@@ -61,6 +61,7 @@ graph TB
 | Public IPs                     | 0 by default | Opt-in per VM                                         |
 | Auto-shutdown schedules        | Up to 5      | Free `Microsoft.DevTestLab/schedules`, opt-out per VM |
 | CustomScriptExtension          | 3            | Arc evaluation VMs only                               |
+| CustomScriptExtension          | 1            | SQL demo VM only - restores AdventureWorks2016        |
 | Entra ID app/service principal | 1 (optional) | Least-privilege Arc onboarding identity               |
 | Role assignment                | 1 (optional) | "Azure Connected Machine Onboarding" at RG scope      |
 
@@ -79,13 +80,25 @@ are deployed.
 
 ## 4. VM allocation table
 
-| VM name       | Management type      | Windows Server edition | Public IP   | Auto-shutdown |
-| ------------- | -------------------- | ---------------------- | ----------- | ------------- |
-| `arc-vm01`    | Azure Arc evaluation | 2016 Datacenter        | No (opt-in) | 19:00 daily   |
-| `arc-vm02`    | Azure Arc evaluation | 2016 Datacenter        | No (opt-in) | 19:00 daily   |
-| `arc-vm03`    | Azure Arc evaluation | 2016 Datacenter        | No (opt-in) | 19:00 daily   |
-| `native-vm01` | Native Azure VM      | 2016 Datacenter        | No (opt-in) | 19:00 daily   |
-| `native-vm02` | Native Azure VM      | 2016 Datacenter        | No (opt-in) | 19:00 daily   |
+| VM name       | Management type      | Windows Server edition    | Public IP   | Auto-shutdown |
+| ------------- | -------------------- | ------------------------- | ----------- | ------------- |
+| `arc-vm01`    | Azure Arc evaluation | 2016 Datacenter           | No (opt-in) | 19:00 daily   |
+| `arc-vm02`    | Azure Arc evaluation | 2016 Datacenter           | No (opt-in) | 19:00 daily   |
+| `arc-vm03`    | Azure Arc evaluation | 2016 Datacenter           | No (opt-in) | 19:00 daily   |
+| `native-vm01` | Native Azure VM      | 2016 Datacenter           | No (opt-in) | 19:00 daily   |
+| `native-vm02` | Native Azure VM      | SQL Server 2016 Developer | No (opt-in) | 19:00 daily   |
+
+`native-vm02` uses the `sql-server-2016-developer` `os_edition` (Marketplace image
+`MicrosoftSQLServer:SQL2016SP2-WS2016:SQLDEV`, verified in Sweden Central) instead of
+plain Windows Server. SQL Server Developer edition has the same feature set as
+Enterprise but is licensed free for non-production use - a good fit for this demo, and
+cheaper than the pay-as-you-go Standard/Enterprise editions which meter SQL licensing
+per vCPU/hour on top of compute cost. A `CustomScriptExtension`
+(`modules/sql-demo-data`) automatically downloads and restores the official Microsoft
+[AdventureWorks2016](https://github.com/Microsoft/sql-server-samples/releases/tag/adventureworks)
+sample database on first boot - no manual SQL setup required. This VM uses
+`Standard_B4s_v2` (4 vCPU/16GB) rather than the default size, since SQL Server needs
+more headroom than the other VMs; override `vm_size` per VM if you want to tune this.
 
 ## 5. Windows Server edition: why all five VMs use Datacenter
 
