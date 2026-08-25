@@ -26,6 +26,51 @@ virtual network/subnet and are optimised for low cost and easy teardown.
 > The three `arc-vm*` machines in this repo are configured exactly for that purpose and
 > must never be treated as a production Arc pattern.
 
+## Quick deployment TLDR
+
+1. Copy [terraform.tfvars.example](terraform.tfvars.example) to `terraform.tfvars` and
+  update the required values. In particular, set your subscription/tenant IDs and set
+  `win11_trusted_rdp_source_cidr` to the public IPv4 of the laptop that will initiate
+  RDP, with `/32` appended.
+2. From the repository root, run:
+
+```bash
+az login
+terraform init
+export TF_VAR_admin_password='choose-a-strong-password-12+chars'
+terraform plan -out=tfplan
+terraform apply tfplan
+```
+
+3. When `arc_onboarding_method = "interactive_user"`, Terraform prepares each Arc VM
+   and installs the Connected Machine agent, but a human must complete the device-code
+   sign-in. For each of `arc-vm01`, `arc-vm02`, and `arc-vm03`, open the Azure Serial
+  Console, open a Command Prompt channel, and run the following command. Replace the
+  placeholders and use `arcvm01`, `arcvm02`, or `arcvm03` for `--resource-name` to
+  match the VM being connected:
+
+```bat
+"C:\Program Files\AzureConnectedMachineAgent\azcmagent.exe" connect --resource-group "<resource-group>" --tenant-id "<tenant-id>" --subscription-id "<subscription-id>" --location "swedencentral" --resource-name "<name>" --cloud "AzureCloud" --tags "ArcEvaluation=true" --use-device-code
+```
+
+Serial Console cannot open a browser. Open the displayed device-code URL on your laptop
+and sign in there with the account granted the `Azure Connected Machine Onboarding`
+role. After `connect` succeeds, verify the connection and then disable the Azure Guest
+Agent as required for this Arc-on-Azure-VM evaluation pattern:
+
+```bat
+"C:\Program Files\AzureConnectedMachineAgent\azcmagent.exe" show
+powershell.exe -NoProfile -Command "Set-Service -Name WindowsAzureGuestAgent -StartupType Disabled; Stop-Service -Name WindowsAzureGuestAgent -Force"
+```
+
+Repeat on all three Arc VMs. Disabling the Guest Agent prevents subsequent Azure Run
+Command and VM extension operations on that VM. This manual step is not required for
+either service-principal onboarding mode.
+
+The password must remain set in the same shell for both `plan` and `apply`. If `plan`
+fails, fix the error and create a new plan before applying. Do not commit `tfplan`; it
+contains sensitive values. Full configuration and deployment details are in §§12-15.
+
 ## 2. Architecture overview
 
 ```mermaid
@@ -305,15 +350,16 @@ or service principal is created at all. Instead:
    Connected Machine agent automatically on `arc-vm01/02/03`, but does **not** run
    `azcmagent connect` - that step requires an interactive device-code/browser login,
    which cannot run unattended inside a CustomScriptExtension.
-3. For each Arc evaluation VM, RDP or Serial-Console in and run:
-   ```powershell
-   .\scripts\Complete-InteractiveArcOnboarding.ps1 -TenantId '<tenant-id>' `
-     -SubscriptionId '<subscription-id>' -ResourceGroupName '<rg-name>' `
-     -Location 'swedencentral' -ResourceName '<computer-name, e.g. arcvm01>'
+3. For each Arc evaluation VM, open Azure Serial Console and run the Connected Machine
+  agent directly with device-code authentication. Use the hyphen-free Windows computer
+  name (`arcvm01`, `arcvm02`, or `arcvm03`) as the Arc resource name:
+  ```bat
+  "C:\Program Files\AzureConnectedMachineAgent\azcmagent.exe" connect --resource-group "<resource-group>" --tenant-id "<tenant-id>" --subscription-id "<subscription-id>" --location "swedencentral" --resource-name "arcvm01" --cloud "AzureCloud" --tags "ArcEvaluation=true" --use-device-code
    ```
-   This prompts a device-code URL/code - sign in with the account that was granted the
-   RBAC role in step 1. It then schedules the same deferred Guest Agent disable used by
-   the automated methods.
+  Open the displayed URL on another device, enter the code, and sign in using the
+  account granted the RBAC role in step 1. Run `azcmagent.exe show` to verify the
+  connection, then disable `WindowsAzureGuestAgent` as shown in the TLDR. Repeat for
+  all three VMs.
 
 ## 11. Secure credential configuration
 
@@ -446,7 +492,7 @@ firewall rules, Guest Agent status, and `azcmagent show` all pass.
 | `terraform plan`/`apply` fails running `modules/arc-onboarding/scripts/compress-script.sh`    | Requires `bash`, `jq`, `gzip`, and `base64` on the machine running Terraform (all present in this repo's devcontainer). Install them, or run Terraform from an environment that has them, if applying from elsewhere.                                                                                                 |
 | `KeyBasedAuthenticationNotPermitted` / `publicNetworkAccess: Disabled` on any storage account | Not applicable to this configuration - it deploys no storage account at all (see §6) specifically to avoid subscriptions that enforce these policies.                                                                                                                                                                 |
 | `a resource ... already exists ... needs to be imported` for the extension                    | A previous failed apply still created the extension in Azure (in a `Failed` state) even though Terraform didn't record it in state. Run `terraform import 'module.arc_onboarding["<vm-name>"].azurerm_virtual_machine_extension.arc_onboarding' '<resource-id>'` for each affected VM, then re-plan/apply.            |
-| `azcmagent connect` fails with auth error                                                     | Confirm the RBAC role assignment has propagated (Terraform waits 30s automatically via `time_sleep`); re-run `scripts/Connect-AzureArcServer.ps1` (SP) or `scripts/Complete-InteractiveArcOnboarding.ps1` (interactive) manually if needed                                                                            |
+| `azcmagent connect` fails with auth error                                                     | Confirm the onboarding RBAC role was assigned to the account used for device-code sign-in and has propagated. For `interactive_user`, retry the TLDR's direct `azcmagent.exe connect ... --use-device-code` command and complete the sign-in on another device.                                                       |
 | Outbound connectivity failures during onboarding                                              | NSG default outbound rules already allow HTTPS; check no custom NSG/firewall changes were made outside this config                                                                                                                                                                                                    |
 | `Invoke-WebRequest` fails with "Could not create SSL/TLS secure channel."                     | Windows Server 2016's default .NET TLS setting excludes TLS 1.2. Already fixed by setting `[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12` before any download in the onboarding script/`Install-ArcConnectedMachineAgent.ps1`.                                                      |
 | IMDS still reachable after "prep" step                                                        | Confirm firewall rules exist: `Get-NetFirewallRule -DisplayName Block-Outbound-*`                                                                                                                                                                                                                                     |
