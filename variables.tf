@@ -247,6 +247,50 @@ variable "interactive_onboarding_principal_id" {
 
 
 ############################################
+# Windows 11 admin workstation
+############################################
+# Optional VM used to RDP in from a remote laptop and manage the Windows
+# Server VMs already deployed here. Pre-installs Azure CLI, Power BI Desktop,
+# and SQL Server Management Studio. See README "Windows 11 admin workstation
+# licensing" before enabling - requires qualifying multi-tenant hosting
+# rights (e.g. Windows/Microsoft 365 E3/E5, Windows VDA).
+
+variable "win11_trusted_rdp_source_cidr" {
+  description = "Public IP (as a /32 CIDR) allowed to RDP into the Windows 11 admin workstation, e.g. \"203.0.113.10/32\" - typically your remote laptop's public IP. Required whenever win11_workstation.enabled = true. Supply via terraform.tfvars; never use 0.0.0.0/0."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = !contains(["0.0.0.0/0", "*", "Internet", "internet"], var.win11_trusted_rdp_source_cidr)
+    error_message = "win11_trusted_rdp_source_cidr must never be 0.0.0.0/0, '*', or 'Internet' - RDP must never be exposed to the whole internet."
+  }
+}
+
+variable "win11_workstation" {
+  description = "Configuration for the optional Windows 11 admin workstation. RDP source is controlled separately via var.win11_trusted_rdp_source_cidr."
+  type = object({
+    enabled               = optional(bool, true)
+    vm_size               = optional(string, "Standard_D2s_v5")
+    auto_shutdown_enabled = optional(bool)
+    auto_shutdown_time    = optional(string)
+    # "None" (standard licensing) or "Windows_Client" (Azure Hybrid Benefit -
+    # only set this if you hold qualifying multi-tenant hosting rights).
+    license_type    = optional(string, "None")
+    additional_tags = optional(map(string), {})
+  })
+
+  validation {
+    condition     = !var.win11_workstation.enabled || (var.win11_trusted_rdp_source_cidr != "")
+    error_message = "win11_trusted_rdp_source_cidr must be set when win11_workstation.enabled = true."
+  }
+
+  validation {
+    condition     = contains(["None", "Windows_Client"], var.win11_workstation.license_type)
+    error_message = "win11_workstation.license_type must be 'None' or 'Windows_Client'."
+  }
+}
+
+############################################
 # VM configuration map
 ############################################
 # Single typed object map driving all 5 VMs through one reusable module

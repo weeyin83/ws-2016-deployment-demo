@@ -28,12 +28,18 @@ module "network" {
 
   # Only VMs with public RDP enabled generate an inbound allow rule; every
   # other VM gets no inbound rule at all (NSG default-denies inbound from
-  # the internet already).
-  rdp_rules = {
-    for k, v in local.vm_configs : k => {
-      source_cidr = v.trusted_rdp_source_cidr
-    } if v.enable_public_rdp
-  }
+  # the internet already). The Windows 11 admin workstation (if enabled) gets
+  # its own scoped rule the same way.
+  rdp_rules = merge(
+    {
+      for k, v in local.vm_configs : k => {
+        source_cidr = v.trusted_rdp_source_cidr
+      } if v.enable_public_rdp
+    },
+    var.win11_workstation.enabled ? {
+      (local.win11_vm_key) = { source_cidr = var.win11_trusted_rdp_source_cidr }
+    } : {}
+  )
 
   tags = local.common_tags
 }
@@ -171,6 +177,36 @@ module "windows_vm" {
   auto_shutdown_timezone = var.auto_shutdown_timezone
 
   tags = local.vm_tags[each.key]
+}
+
+############################################
+# Windows 11 admin workstation - optional, RDP-reachable jumpbox with Azure
+# CLI, Power BI Desktop, and SQL Server Management Studio pre-installed.
+# Shares the same VNet/subnet as the Windows Server VMs above.
+############################################
+
+module "windows11_workstation" {
+  count  = var.win11_workstation.enabled ? 1 : 0
+  source = "./modules/windows11-vm"
+
+  vm_key              = local.win11_vm_key
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
+  subnet_id           = module.network.subnet_id
+
+  admin_username = var.admin_username
+  admin_password = var.admin_password
+
+  vm_size                      = var.win11_workstation.vm_size
+  os_disk_storage_account_type = var.os_disk_storage_account_type
+  image_reference              = local.win11_image
+  license_type                 = var.win11_workstation.license_type
+
+  auto_shutdown_enabled  = coalesce(var.win11_workstation.auto_shutdown_enabled, var.default_auto_shutdown_enabled)
+  auto_shutdown_time     = coalesce(var.win11_workstation.auto_shutdown_time, var.default_auto_shutdown_time)
+  auto_shutdown_timezone = var.auto_shutdown_timezone
+
+  tags = local.win11_vm_tags
 }
 
 ############################################

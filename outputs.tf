@@ -46,6 +46,15 @@ output "native_azure_vm_names" {
   value       = keys(local.native_vm_configs)
 }
 
+output "win11_workstation" {
+  description = "Windows 11 admin workstation connection details (null if win11_workstation.enabled = false). RDP to public_ip_address using admin_username/admin_password - restricted to the trusted_rdp_source_cidr you configured."
+  value = var.win11_workstation.enabled ? {
+    private_ip_address   = module.windows11_workstation[0].private_ip_address
+    public_ip_address    = module.windows11_workstation[0].public_ip_address
+    azure_vm_resource_id = module.windows11_workstation[0].vm_id
+  } : null
+}
+
 output "arc_enabled_server_resource_ids" {
   description = "Resource IDs of the Azure Arc-enabled server (Microsoft.HybridCompute/machines) objects created by onboarding, keyed by VM name."
   value       = { for k, v in module.arc_onboarding : k => v.arc_machine_resource_id }

@@ -3,15 +3,21 @@
 ## 1. Solution overview
 
 Terraform IaC that deploys a small, temporary demonstration environment in **Sweden
-Central** containing **five Windows Server 2016 Datacenter virtual machines**:
+Central** containing **five Windows Server 2016 virtual machines** and an optional
+**Windows 11 administration workstation**:
 
 - **Three** VMs (`arc-vm01`, `arc-vm02`, `arc-vm03`) are automatically prepared and
   onboarded as **Azure Arc-enabled servers, for evaluation/testing only**.
 - **Two** VMs (`native-vm01`, `native-vm02`) remain standard, unmodified native Azure VMs.
+- **One** Windows 11 Pro VM (`win11-ws01`) provides a restricted RDP entry point and
+  shares the servers' VNet/subnet. Azure CLI, Power BI Desktop, and SQL Server
+  Management Studio (SSMS) are installed automatically.
 
-All five VMs are created from a **single reusable module** ([modules/windows-vm](modules/windows-vm/main.tf))
-driven by one typed map variable (`var.vm_configs`), share one virtual network/subnet, and
-are optimised for low cost, fast deployment, and easy teardown.
+The five server VMs are created from a **single reusable module**
+([modules/windows-vm](modules/windows-vm/main.tf)) driven by one typed map variable
+(`var.vm_configs`). The workstation uses the dedicated
+[modules/windows11-vm](modules/windows11-vm/main.tf) module. All six VMs share one
+virtual network/subnet and are optimised for low cost and easy teardown.
 
 > **⚠️ Azure Arc evaluation warning**
 > Connecting an Azure VM to Azure Arc-enabled servers is **unsupported for production**.
@@ -19,6 +25,51 @@ are optimised for low cost, fast deployment, and easy teardown.
 > reconfigured to behave like a non-Azure machine (see [Microsoft's guidance](https://learn.microsoft.com/en-us/azure/azure-arc/servers/plan-evaluate-on-azure-virtual-machine)).
 > The three `arc-vm*` machines in this repo are configured exactly for that purpose and
 > must never be treated as a production Arc pattern.
+
+## Quick deployment TLDR
+
+1. Copy [terraform.tfvars.example](terraform.tfvars.example) to `terraform.tfvars` and
+  update the required values. In particular, set your subscription/tenant IDs and set
+  `win11_trusted_rdp_source_cidr` to the public IPv4 of the laptop that will initiate
+  RDP, with `/32` appended.
+2. From the repository root, run:
+
+```bash
+az login
+terraform init
+export TF_VAR_admin_password='choose-a-strong-password-12+chars'
+terraform plan -out=tfplan
+terraform apply tfplan
+```
+
+3. When `arc_onboarding_method = "interactive_user"`, Terraform prepares each Arc VM
+   and installs the Connected Machine agent, but a human must complete the device-code
+   sign-in. For each of `arc-vm01`, `arc-vm02`, and `arc-vm03`, open the Azure Serial
+  Console, open a Command Prompt channel, and run the following command. Replace the
+  placeholders and use `arcvm01`, `arcvm02`, or `arcvm03` for `--resource-name` to
+  match the VM being connected:
+
+```bat
+"C:\Program Files\AzureConnectedMachineAgent\azcmagent.exe" connect --resource-group "<resource-group>" --tenant-id "<tenant-id>" --subscription-id "<subscription-id>" --location "swedencentral" --resource-name "<name>" --cloud "AzureCloud" --tags "ArcEvaluation=true" --use-device-code
+```
+
+Serial Console cannot open a browser. Open the displayed device-code URL on your laptop
+and sign in there with the account granted the `Azure Connected Machine Onboarding`
+role. After `connect` succeeds, verify the connection and then disable the Azure Guest
+Agent as required for this Arc-on-Azure-VM evaluation pattern:
+
+```bat
+"C:\Program Files\AzureConnectedMachineAgent\azcmagent.exe" show
+powershell.exe -NoProfile -Command "Set-Service -Name WindowsAzureGuestAgent -StartupType Disabled; Stop-Service -Name WindowsAzureGuestAgent -Force"
+```
+
+Repeat on all three Arc VMs. Disabling the Guest Agent prevents subsequent Azure Run
+Command and VM extension operations on that VM. This manual step is not required for
+either service-principal onboarding mode.
+
+The password must remain set in the same shell for both `plan` and `apply`. If `plan`
+fails, fix the error and create a new plan before applying. Do not commit `tfplan`; it
+contains sensitive values. Full configuration and deployment details are in §§12-15.
 
 ## 2. Architecture overview
 
@@ -28,6 +79,7 @@ graph TB
     VNET[VNet 10.60.0.0/24]
     SUBNET[Subnet 10.60.0.0/26]
     NSG[Network Security Group]
+    LAPTOP[Remote laptop<br/>trusted IPv4 /32]
 
     RG --> VNET --> SUBNET
     SUBNET --- NSG
@@ -40,10 +92,15 @@ graph TB
 
     subgraph "Native Azure VMs"
         N1[native-vm01<br/>WS2016 Datacenter]
-        N2[native-vm02<br/>WS2016 Datacenter]
+      N2[native-vm02<br/>SQL Server 2016 Developer]
     end
 
-    SUBNET --> A1 & A2 & A3 & N1 & N2
+    subgraph "Administration workstation"
+      W11[win11-ws01<br/>Windows 11 Pro 24H2<br/>Azure CLI + Power BI + SSMS]
+    end
+
+    SUBNET --> A1 & A2 & A3 & N1 & N2 & W11
+    LAPTOP -->|TCP 3389<br/>source-restricted NSG rule| W11
 
     A1 & A2 & A3 -. CustomScriptExtension .-> ARC[Azure Arc-enabled servers<br/>Microsoft.HybridCompute/machines]
     SPN[Entra SP: Azure Connected Machine Onboarding role] -. least-privilege .-> ARC
@@ -51,19 +108,21 @@ graph TB
 
 ## 3. Resource inventory
 
-| Resource                       | Count        | Notes                                                 |
-| ------------------------------ | ------------ | ----------------------------------------------------- |
-| Resource group                 | 1            | Dedicated to this demo                                |
-| Virtual network + subnet       | 1 each       | Shared by all 5 VMs                                   |
-| Network security group         | 1            | Subnet-level, minimum required rules                  |
-| Windows VMs                    | 5            | Single reusable module, `for_each`                    |
-| NICs                           | 5            | One per VM                                            |
-| Public IPs                     | 0 by default | Opt-in per VM                                         |
-| Auto-shutdown schedules        | Up to 5      | Free `Microsoft.DevTestLab/schedules`, opt-out per VM |
-| CustomScriptExtension          | 3            | Arc evaluation VMs only                               |
-| CustomScriptExtension          | 1            | SQL demo VM only - restores AdventureWorks2016        |
-| Entra ID app/service principal | 1 (optional) | Least-privilege Arc onboarding identity               |
-| Role assignment                | 1 (optional) | "Azure Connected Machine Onboarding" at RG scope      |
+| Resource                       | Count        | Notes                                                   |
+| ------------------------------ | ------------ | ------------------------------------------------------- |
+| Resource group                 | 1            | Dedicated to this demo                                  |
+| Virtual network + subnet       | 1 each       | Shared by all 6 VMs                                     |
+| Network security group         | 1            | Subnet-level; workstation RDP restricted by source CIDR |
+| Windows Server VMs             | 5            | Single reusable module, `for_each`                      |
+| Windows 11 workstation         | 1 (optional) | RDP administration VM                                   |
+| NICs                           | Up to 6      | One per VM                                              |
+| Public IPs                     | 1 by default | Static Standard IP for the enabled workstation          |
+| Auto-shutdown schedules        | Up to 6      | Free `Microsoft.DevTestLab/schedules`, opt-out per VM   |
+| CustomScriptExtension          | 3            | Arc evaluation VMs only                                 |
+| CustomScriptExtension          | 1            | SQL demo VM only - restores AdventureWorks2016          |
+| CustomScriptExtension          | 1            | Installs workstation administration tools               |
+| Entra ID app/service principal | 1 (optional) | Least-privilege Arc onboarding identity                 |
+| Role assignment                | 1 (optional) | "Azure Connected Machine Onboarding" at RG scope        |
 
 No storage account is deployed. The onboarding script is too large to inline directly
 into the CustomScriptExtension's `commandToExecute` (Windows CSE always runs it via
@@ -87,6 +146,7 @@ are deployed.
 | `arc-vm03`    | Azure Arc evaluation | 2016 Datacenter           | No (opt-in) | 19:00 daily   |
 | `native-vm01` | Native Azure VM      | 2016 Datacenter           | No (opt-in) | 19:00 daily   |
 | `native-vm02` | Native Azure VM      | SQL Server 2016 Developer | No (opt-in) | 19:00 daily   |
+| `win11-ws01`  | Admin workstation    | Windows 11 Pro 24H2       | Yes         | 19:00 daily   |
 
 `native-vm02` uses the `sql-server-2016-developer` `os_edition` (Marketplace image
 `MicrosoftSQLServer:SQL2016SP2-WS2016:SQLDEV`, verified in Sweden Central) instead of
@@ -99,6 +159,36 @@ per vCPU/hour on top of compute cost. A `CustomScriptExtension`
 sample database on first boot - no manual SQL setup required. This VM uses
 `Standard_B4s_v2` (4 vCPU/16GB) rather than the default size, since SQL Server needs
 more headroom than the other VMs; override `vm_size` per VM if you want to tune this.
+
+### Windows 11 administration workstation
+
+`win11-ws01` uses the verified Sweden Central Marketplace image
+`MicrosoftWindowsDesktop:windows-11:win11-24h2-pro:26100.9168.260809`. It is a Gen2
+image configured with Secure Boot and vTPM. The default size is `Standard_D2s_v5`
+(2 vCPU/8 GB), which was confirmed available for this subscription in Sweden Central.
+
+The workstation is attached to the same subnet as the five servers, so it can reach
+their private IP addresses without exposing those servers publicly. Its own static
+Standard public IP exists only to support RDP from the source configured in
+`win11_trusted_rdp_source_cidr`.
+
+The workstation Custom Script Extension runs as `SYSTEM`, bootstraps Chocolatey, then
+installs these packages sequentially:
+
+- `azure-cli`
+- `powerbi` (Power BI Desktop)
+- `sql-server-management-studio` (SSMS)
+
+Power BI and SSMS are large packages, so this extension commonly takes 20-40 minutes.
+Terraform waits for it to finish. Installation output is written inside the VM to
+`C:\WindowsAzure\Logs\install-admin-tools.log`.
+
+> **Windows 11 licensing prerequisite**
+> The deploying organisation must hold qualifying Windows/Microsoft 365 rights for
+> Windows client workloads in multi-tenant hosting (for example, qualifying Windows
+> Enterprise, Microsoft 365, or Windows VDA rights). Terraform cannot verify licensing.
+> Set `win11_workstation.license_type = "Windows_Client"` only when your licensing
+> terms permit Azure Hybrid Benefit for this workload.
 
 ## 5. Windows Server edition: why all five VMs use Datacenter
 
@@ -163,6 +253,8 @@ manageable via normal Azure VM extension operations.
 - `bash`, `jq`, `gzip`, and `base64` available on the machine running Terraform (used to
   compress the Arc onboarding script - see §6; all present in this repo's devcontainer)
 - An Azure subscription with quota for `Standard_B2s_v2` in Sweden Central
+- Quota for `Standard_D2s_v5` when the Windows 11 workstation is enabled
+- Qualifying Windows client multi-tenant hosting rights when deploying Windows 11
 - Entra ID permission to create an application/service principal (only if
   `arc_onboarding_method = "service_principal_new"`, the default - see §10 for
   alternatives if your tenant restricts this)
@@ -187,10 +279,11 @@ manageable via normal Azure VM extension operations.
   service principal secret in Terraform state, and the rendered onboarding script
   (including that secret) is stored in state as part of the extension's
   `protected_settings`. See §24 "Terraform state security."
-- Without Bastion, a VPN, or a public IP, there is **no network path to RDP into any VM**
-  that has `enable_public_ip = false` (the default for all five VMs). Use the optional
-  per-VM public IP + restricted RDP feature (§15) for temporary direct access, or connect
-  via a jump box/VPN of your own.
+- The workstation intentionally has a public IP when enabled. Its NSG rule permits TCP
+  3389 only from `win11_trusted_rdp_source_cidr`; changing networks, enabling a VPN, or
+  receiving a new dynamic ISP address may require updating that value and re-applying.
+- Server VMs with `enable_public_ip = false` remain private. Use `win11-ws01` as the
+  administration workstation to reach them over their private addresses.
 
 ## 9. Required Azure roles
 
@@ -257,15 +350,16 @@ or service principal is created at all. Instead:
    Connected Machine agent automatically on `arc-vm01/02/03`, but does **not** run
    `azcmagent connect` - that step requires an interactive device-code/browser login,
    which cannot run unattended inside a CustomScriptExtension.
-3. For each Arc evaluation VM, RDP or Serial-Console in and run:
-   ```powershell
-   .\scripts\Complete-InteractiveArcOnboarding.ps1 -TenantId '<tenant-id>' `
-     -SubscriptionId '<subscription-id>' -ResourceGroupName '<rg-name>' `
-     -Location 'swedencentral' -ResourceName '<computer-name, e.g. arcvm01>'
+3. For each Arc evaluation VM, open Azure Serial Console and run the Connected Machine
+  agent directly with device-code authentication. Use the hyphen-free Windows computer
+  name (`arcvm01`, `arcvm02`, or `arcvm03`) as the Arc resource name:
+  ```bat
+  "C:\Program Files\AzureConnectedMachineAgent\azcmagent.exe" connect --resource-group "<resource-group>" --tenant-id "<tenant-id>" --subscription-id "<subscription-id>" --location "swedencentral" --resource-name "arcvm01" --cloud "AzureCloud" --tags "ArcEvaluation=true" --use-device-code
    ```
-   This prompts a device-code URL/code - sign in with the account that was granted the
-   RBAC role in step 1. It then schedules the same deferred Guest Agent disable used by
-   the automated methods.
+  Open the displayed URL on another device, enter the code, and sign in using the
+  account granted the RBAC role in step 1. Run `azcmagent.exe show` to verify the
+  connection, then disable `WindowsAzureGuestAgent` as shown in the TLDR. Repeat for
+  all three VMs.
 
 ## 11. Secure credential configuration
 
@@ -293,6 +387,26 @@ cp terraform.tfvars.example terraform.tfvars
 # (do NOT put admin_password or SP secrets in this file)
 ```
 
+Configure the workstation and the public IPv4 CIDR of the laptop/network that will
+initiate RDP. A single IPv4 address must use `/32`:
+
+```hcl
+win11_trusted_rdp_source_cidr = "203.0.113.10/32"
+
+win11_workstation = {
+  enabled      = true
+  license_type = "Windows_Client"
+}
+```
+
+To find the current public IPv4 address from the same laptop used for RDP:
+
+```powershell
+(Invoke-RestMethod -Uri 'https://api.ipify.org')
+```
+
+Do not use the devcontainer's egress IP unless RDP also originates from that network.
+
 ## 13. Image availability verification instructions
 
 Re-verify before every deployment if you're unsure the Marketplace catalog hasn't
@@ -308,21 +422,29 @@ version/edition without updating `locals.tf` deliberately and re-reading this se
 
 ## 14. Public RDP security warning
 
-`enable_public_rdp` **cannot** be enabled without also setting `enable_public_ip = true`
-and a `trusted_rdp_source_cidr`. Terraform variable validation actively **rejects**
-`0.0.0.0/0`, `*`, or `Internet` as a trusted CIDR - RDP must never be exposed to the whole
-internet. Always scope `trusted_rdp_source_cidr` to your own public IP (`/32`) or a small
-corporate range.
+The Windows 11 workstation's RDP rule uses `win11_trusted_rdp_source_cidr`. For optional
+direct RDP to a server VM, `enable_public_rdp` cannot be enabled without also setting
+`enable_public_ip = true` and that VM's `trusted_rdp_source_cidr`. Variable validation
+rejects `0.0.0.0/0`, `*`, and `Internet`. Always use your current public IPv4 as `/32`
+or a deliberately approved corporate CIDR.
 
 ## 15. Deployment commands
 
 ```bash
+az login
+export TF_VAR_admin_password='choose-a-strong-password-12+chars'
+
 terraform init
 terraform fmt -check
 terraform validate
 terraform plan -out=tfplan
 terraform apply tfplan
 ```
+
+The password environment variable must be set in the same shell that runs `plan` and
+`apply`. If planning fails, do not apply the incomplete plan: correct the error and run
+both commands again. The saved plan contains sensitive values; do not commit it and
+delete it after the apply (`rm -f tfplan`).
 
 ## 16. Verification instructions
 
@@ -332,11 +454,26 @@ terraform apply tfplan
 # Arc-enabled servers (expect exactly arc-vm01, arc-vm02, arc-vm03)
 az resource list --resource-group <rg-name> --resource-type Microsoft.HybridCompute/machines -o table
 
-# All Azure VM resources (expect all five)
+# All Azure VM resources (expect six when the workstation is enabled)
 az vm list --resource-group <rg-name> -o table
 
 # Confirm Windows Server edition per VM
 az vm show --resource-group <rg-name> --name arc-vm01 --query "storageProfile.imageReference.sku" -o tsv
+
+# Get the workstation public IP used as the RDP destination
+terraform output -json win11_workstation
+```
+
+RDP to the workstation output's `public_ip_address` using `var.admin_username` and the
+password supplied through `TF_VAR_admin_password`. In SSMS, connect to the SQL VM using
+its private IP from `terraform output -json vm_summary`.
+
+Verify that workstation tooling is installed after the extension finishes:
+
+```powershell
+az version
+Get-Item 'C:\Program Files\Microsoft Power BI Desktop\bin\PBIDesktop.exe'
+Get-ChildItem 'C:\Program Files (x86)\Microsoft SQL Server Management Studio*' -Recurse -Filter Ssms.exe
 ```
 
 **On each Arc evaluation VM** (via RDP/Serial Console, since the Guest Agent will be
@@ -355,16 +492,20 @@ firewall rules, Guest Agent status, and `azcmagent show` all pass.
 | `terraform plan`/`apply` fails running `modules/arc-onboarding/scripts/compress-script.sh`    | Requires `bash`, `jq`, `gzip`, and `base64` on the machine running Terraform (all present in this repo's devcontainer). Install them, or run Terraform from an environment that has them, if applying from elsewhere.                                                                                                 |
 | `KeyBasedAuthenticationNotPermitted` / `publicNetworkAccess: Disabled` on any storage account | Not applicable to this configuration - it deploys no storage account at all (see §6) specifically to avoid subscriptions that enforce these policies.                                                                                                                                                                 |
 | `a resource ... already exists ... needs to be imported` for the extension                    | A previous failed apply still created the extension in Azure (in a `Failed` state) even though Terraform didn't record it in state. Run `terraform import 'module.arc_onboarding["<vm-name>"].azurerm_virtual_machine_extension.arc_onboarding' '<resource-id>'` for each affected VM, then re-plan/apply.            |
-| `azcmagent connect` fails with auth error                                                     | Confirm the RBAC role assignment has propagated (Terraform waits 30s automatically via `time_sleep`); re-run `scripts/Connect-AzureArcServer.ps1` (SP) or `scripts/Complete-InteractiveArcOnboarding.ps1` (interactive) manually if needed                                                                            |
+| `azcmagent connect` fails with auth error                                                     | Confirm the onboarding RBAC role was assigned to the account used for device-code sign-in and has propagated. For `interactive_user`, retry the TLDR's direct `azcmagent.exe connect ... --use-device-code` command and complete the sign-in on another device.                                                       |
 | Outbound connectivity failures during onboarding                                              | NSG default outbound rules already allow HTTPS; check no custom NSG/firewall changes were made outside this config                                                                                                                                                                                                    |
 | `Invoke-WebRequest` fails with "Could not create SSL/TLS secure channel."                     | Windows Server 2016's default .NET TLS setting excludes TLS 1.2. Already fixed by setting `[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12` before any download in the onboarding script/`Install-ArcConnectedMachineAgent.ps1`.                                                      |
 | IMDS still reachable after "prep" step                                                        | Confirm firewall rules exist: `Get-NetFirewallRule -DisplayName Block-Outbound-*`                                                                                                                                                                                                                                     |
-| Can't RDP to any VM                                                                           | Expected - no public IP/Bastion/VPN by default. Enable `enable_public_ip`/`enable_public_rdp` for one VM temporarily (§14)                                                                                                                                                                                            |
+| Workstation tool extension remains "Creating" for 20-40 minutes                               | Usually expected while Chocolatey installs Azure CLI, Power BI, and SSMS sequentially. Check `C:\WindowsAzure\Logs\install-admin-tools.log`; the extension timeout is longer than a typical installation.                                                                                                             |
+| `computer_name` can be at most 15 characters                                                  | Fixed by naming the workstation `win11-ws01`; keep future Windows computer names at 15 characters or fewer.                                                                                                                                                                                                           |
+| Can't RDP to `win11-ws01`                                                                     | Confirm the destination is the workstation's public IP, then retrieve your current IPv4 from `https://api.ipify.org`. Update `win11_trusted_rdp_source_cidr` with `/32` and re-apply. VPNs and dynamic ISP addresses commonly change the apparent source.                                                             |
+| RDP still fails with the correct IP                                                           | Check the effective NSG and guest: `az network nic list-effective-nsg -g <rg> -n nic-win11-ws01`; inside the VM, `TermService` must run and TCP 3389 must listen. Azure Run Command can inspect these without RDP.                                                                                                    |
 
 ## 18. Security considerations
 
-- No public IPs, Bastion, VPN, or NSG inbound rules by default - fully private-by-default.
-- RDP exposure (if enabled) is always scoped to an explicit, validated, non-internet CIDR.
+- The five servers remain private by default. The optional Windows 11 workstation has
+  one static public IP and one source-restricted TCP 3389 rule when enabled.
+- RDP exposure is scoped to an explicit, validated, non-internet CIDR.
 - The Arc onboarding service principal is scoped to a single built-in role at resource
   group level - not `Owner`/`Contributor`.
 - Secrets (`admin_password`, service principal secret) are marked `sensitive`, never
@@ -404,9 +545,10 @@ account key in committed files.
 
 ## 20. Cost drivers (no prices invented)
 
-- **VM compute hours** for 5x `Standard_B2s_v2` - the largest cost driver, mitigated by
-  daily auto-shutdown (`default_auto_shutdown_enabled = true`).
-- **Standard HDD OS disks** (`Standard_LRS`) x5 - lowest-cost managed disk tier.
+- **VM compute hours** for the five servers plus the optional `Standard_D2s_v5`
+  workstation - the largest cost driver, mitigated by daily auto-shutdown.
+- **Standard HDD OS disks** (`Standard_LRS`) for each VM.
+- A static Standard public IP for the enabled Windows 11 workstation.
 - **Marketplace image licensing** for Windows Server 2016 Datacenter, included in the
   VM's pay-as-you-go price unless `enable_azure_hybrid_benefit = true` (requires you to
   already hold qualifying licences - never enabled by default).
@@ -416,10 +558,10 @@ account key in committed files.
 ## 21. Auto-shutdown behaviour
 
 Each VM gets a free `Microsoft.DevTestLab/schedules` auto-shutdown resource (not an Azure
-DevTest Labs instance) unless `auto_shutdown_enabled = false` for that VM. Default time is
-19:00 (`W. Europe Standard Time`), configurable globally (`default_auto_shutdown_time`) or
-per VM (`vm_configs.<key>.auto_shutdown_time`). Notifications are disabled by default to
-avoid needing a webhook/Action Group for this demo.
+DevTest Labs instance) unless auto-shutdown is disabled. Default time is 19:00
+(`W. Europe Standard Time`), configurable globally (`default_auto_shutdown_time`), per
+server (`vm_configs.<key>.auto_shutdown_time`), or on the workstation
+(`win11_workstation.auto_shutdown_time`). Notifications are disabled by default.
 
 ## 22. Cleanup instructions
 
@@ -448,14 +590,15 @@ cleanup, though running it first is tidier if you plan to reuse the underlying i
 ## 23. Summary: architecture, deployment, validation, limitations
 
 **Deployment sequence:** `terraform init` → `plan` → `apply` creates the resource group
-and network first, then all five VMs in parallel via `for_each`, then (only for the three
-`arc-vm*` VMs) the onboarding extension, which depends on the VM and on the service
-principal's role assignment having propagated.
+and network first, then the five server VMs and optional Windows 11 workstation. The
+workstation extension installs Azure CLI, Power BI, and SSMS; the Arc extensions depend
+on their VMs and the onboarding role assignment having propagated.
 
-**Validation checklist:** `terraform validate` passes; `terraform plan` shows exactly 1
-resource group, 1 VNet, 1 subnet, 1 NSG, 5 VMs/NICs, up to 5 auto-shutdown schedules, 3
-onboarding extensions, and (if enabled) 1 Entra application/service principal/role
-assignment - no Bastion/Firewall/NAT/LB/Backup/Defender/Log Analytics resources.
+**Validation checklist:** `terraform validate` passes; with the workstation enabled,
+`terraform plan` shows 1 resource group, 1 VNet, 1 subnet, 1 NSG, 6 VMs/NICs, 1 public
+IP, up to 6 auto-shutdown schedules, 3 Arc onboarding extensions, 1 SQL data extension,
+and 1 workstation tools extension. No Bastion/Firewall/NAT/LB/Backup/Defender/Log
+Analytics resources are introduced.
 
 **Cleanup sequence:** optionally run `Remove-ArcEvaluationConfiguration.ps1` on each Arc
 VM, then `terraform destroy`.
